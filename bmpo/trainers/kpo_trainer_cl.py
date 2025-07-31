@@ -16,6 +16,7 @@ import warnings
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 import importlib
+import json
 
 
 import torch
@@ -28,6 +29,35 @@ from transformers.trainer_callback import TrainerCallback
 import os
 import sys
 from ..utils.trainer_utils import DPODataCollatorWithPadding, pad_to_length
+
+
+def debug_log(func_name: str, stage: str, data: Any = None, extra_info: str = ""):
+    """Enhanced debug logging function"""
+    separator = "=" * 80
+    print(f"\n{separator}")
+    print(f"[DEBUG] Function: {func_name} | Stage: {stage}")
+    if extra_info:
+        print(f"[INFO] {extra_info}")
+    
+    if data is not None:
+        if isinstance(data, dict):
+            print(f"[DATA] Dictionary with keys: {list(data.keys())}")
+            for key, value in data.items():
+                if hasattr(value, 'shape'):
+                    print(f"  {key}: shape={value.shape}, dtype={value.dtype}")
+                elif isinstance(value, (list, tuple)):
+                    print(f"  {key}: type={type(value).__name__}, length={len(value)}")
+                else:
+                    print(f"  {key}: type={type(value).__name__}, value={value}")
+        elif hasattr(data, 'shape'):
+            print(f"[DATA] Tensor: shape={data.shape}, dtype={data.dtype}")
+        elif isinstance(data, (list, tuple)):
+            print(f"[DATA] {type(data).__name__}: length={len(data)}")
+            if len(data) > 0:
+                print(f"  First element type: {type(data[0])}")
+        else:
+            print(f"[DATA] Type: {type(data).__name__}, Value: {data}")
+    print(separator)
 
 
 def is_peft_available():
@@ -36,43 +66,7 @@ def is_peft_available():
 if is_peft_available():
     from peft import get_peft_model#, prepare_model_for_int8_training
 
-import warnings
-from collections import defaultdict
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
-import importlib
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import RandomSampler, SequentialSampler
-from datasets import Dataset
-from transformers import DataCollator, PreTrainedModel, PreTrainedTokenizerBase, Trainer, TrainingArguments
-from transformers.trainer_callback import TrainerCallback
-import os
-import sys
-from ..utils.trainer_utils import DPODataCollatorWithPadding, pad_to_length
 
-def debug_print(func):
-    def wrapper(*args, **kwargs):
-        print(f"\n[CALL] {func.__name__}()")
-        print("Arguments:")
-        for i, arg in enumerate(args):
-            print(f" arg[{i}]: {type(arg)}")
-        print("Keyword arguments:")
-        for k, v in kwargs.items():
-            print(f" {k}: {type(v)}")
-        result = func(*args, **kwargs)
-        print(f"Return value: {type(result)}\n")
-        return result
-    return wrapper
-
-# Apply debug wrapper to every method in the class
-
-def debug_all_methods(cls):
-    for attr_name in dir(cls):
-        attr = getattr(cls, attr_name)
-        if callable(attr) and not attr_name.startswith("__"):
-            setattr(cls, attr_name, debug_print(attr))
-    return cls
 
 class KPOTrainer(Trainer):
     r"""
@@ -142,6 +136,16 @@ class KPOTrainer(Trainer):
         max_prompt_length: Optional[int] = None,
         peft_config: Optional[Dict] = None,
     ):
+        debug_log("__init__", "INPUT", {
+            "beta": beta,
+            "label_pad_token_id": label_pad_token_id,
+            "padding_value": padding_value,
+            "truncation_mode": truncation_mode,
+            "max_length": max_length,
+            "max_prompt_length": max_prompt_length,
+            "peft_config": peft_config
+        }, "Initializing KPOTrainer")
+        
         if not is_peft_available() and peft_config is not None:
             raise ValueError(
                 "PEFT is not installed and you passed a `peft_config` in the trainer's kwargs, please install it to use the PEFT models"
@@ -203,6 +207,13 @@ class KPOTrainer(Trainer):
 
         self._stored_metrics = defaultdict(lambda: defaultdict(list))
 
+        debug_log("__init__", "BEFORE_SUPER", {
+            "use_dpo_data_collator": self.use_dpo_data_collator,
+            "beta": self.beta,
+            "label_pad_token_id": self.label_pad_token_id,
+            "padding_value": self.padding_value
+        }, "About to call parent constructor")
+
         super().__init__(
             model,
             args,
@@ -219,6 +230,7 @@ class KPOTrainer(Trainer):
         # Since we inherit from trainer we always have access to an accelerator
         if hasattr(self, "accelerator"):
             self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
+            debug_log("__init__", "OUTPUT", None, "Successfully initialized KPOTrainer with accelerator")
         else:
             raise AttributeError(
                 "Your `Trainer` does not have an `accelerator` object. Consider upgrading `transformers`."
@@ -233,19 +245,34 @@ class KPOTrainer(Trainer):
         Returns:
             A dictionary containing the concatenated inputs under the key 'concatenated_input_ids'.
         """
-        #print('[concatenated_inputs]batch = ', batch)
+        debug_log("concatenated_inputs", "INPUT", batch, "Processing batch for concatenation")
+        
         rejected_max_len = max([batch[key].shape[1] for key in batch if key.startswith("rejected") and key.endswith("_input_ids")])
         max_length = max(batch["chosen_input_ids"].shape[1], rejected_max_len)
+        
+        debug_log("concatenated_inputs", "PROCESSING", {
+            "chosen_length": batch["chosen_input_ids"].shape[1],
+            "rejected_max_len": rejected_max_len,
+            "final_max_length": max_length
+        }, "Calculated max lengths")
+        
         concatenated_batch = {}
         for k in batch:
             if k.startswith("chosen") and isinstance(batch[k], torch.Tensor):
                 pad_value = self.label_pad_token_id if "labels" in k else self.padding_value
                 concatenated_key = k.replace("chosen", "concatenated")
                 concatenated_batch[concatenated_key] = pad_to_length(batch[k], max_length, pad_value=pad_value)
+                debug_log("concatenated_inputs", "CHOSEN_PROCESSING", {
+                    "key": k,
+                    "concatenated_key": concatenated_key,
+                    "pad_value": pad_value,
+                    "original_shape": batch[k].shape,
+                    "padded_shape": concatenated_batch[concatenated_key].shape
+                })
+        
         for k in batch:
             if k.startswith("rejected") and isinstance(batch[k], torch.Tensor):
                 pad_value = self.label_pad_token_id if "labels" in k else self.padding_value
-                # concatenated_key = k.replace("rejected", "concatenated")
                 prefix = k.split("_")[0]
                 concatenated_key = "concatenated" + k[len(prefix):]
                 concatenated_batch[concatenated_key] = torch.cat(
@@ -255,11 +282,25 @@ class KPOTrainer(Trainer):
                     ),
                     dim=0,
                 ).to(self.accelerator.device)
+                debug_log("concatenated_inputs", "REJECTED_PROCESSING", {
+                    "key": k,
+                    "prefix": prefix,
+                    "concatenated_key": concatenated_key,
+                    "pad_value": pad_value,
+                    "original_shape": batch[k].shape,
+                    "final_shape": concatenated_batch[concatenated_key].shape
+                })
+        
+        debug_log("concatenated_inputs", "OUTPUT", concatenated_batch, "Final concatenated batch")
         return concatenated_batch
 
     def _get_train_sampler(self, *args, **kwargs) -> Optional[torch.utils.data.Sampler]:
+        debug_log("_get_train_sampler", "INPUT", {"args": args, "kwargs": kwargs})
         print("use SequentialSampler")
-        return SequentialSampler(self.train_dataset)
+        sampler = SequentialSampler(self.train_dataset)
+        debug_log("_get_train_sampler", "OUTPUT", {"sampler_type": type(sampler).__name__})
+        return sampler
+    
     def dpo_loss(
         self,
         policy_chosen_logps: torch.FloatTensor,
@@ -269,25 +310,23 @@ class KPOTrainer(Trainer):
         select_k: list = None, # batchsize
         reference_free: bool = False,
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
-        """Compute the DPO loss for a batch of policy and reference model log probabilities.
-
-        Args:
-            policy_chosen_logps: Log probabilities of the policy model for the chosen responses. Shape: (batch_size,)
-            policy_rejected_logps: Log probabilities of the policy model for the rejected responses. Shape: (batch_size,)
-            reference_chosen_logps: Log probabilities of the reference model for the chosen responses. Shape: (batch_size,)
-            reference_rejected_logps: Log probabilities of the reference model for the rejected responses. Shape: (batch_size,)
-            beta: Temperature parameter for the DPO loss, typically something in the range of 0.1 to 0.5. We ignore the reference model as beta -> 0.
-            reference_free: If True, we ignore the _provided_ reference model and implicitly use a reference model that assigns equal probability to all responses.
-
-        Returns:
-            A tuple of three tensors: (losses, chosen_rewards, rejected_rewards).
-            The losses tensor contains the DPO loss for each example in the batch.
-            The chosen_rewards and rejected_rewards tensors contain the rewards for the chosen and rejected responses, respectively.
-        """
+        """Compute the DPO loss for a batch of policy and reference model log probabilities."""
+        
+        debug_log("dpo_loss", "INPUT", {
+            "policy_chosen_logps": policy_chosen_logps,
+            "policy_rejected_logps_keys": list(policy_rejected_logps.keys()) if policy_rejected_logps else [],
+            "reference_chosen_logps": reference_chosen_logps,
+            "reference_rejected_logps_keys": list(reference_rejected_logps.keys()) if reference_rejected_logps else [],
+            "select_k": select_k,
+            "reference_free": reference_free,
+            "beta": self.beta
+        }, "Computing DPO loss")
+        
         chosen_logratios = policy_chosen_logps - reference_chosen_logps
         rejected_logratios = {}
         for key in policy_rejected_logps:
             rejected_logratios[key] = policy_rejected_logps[key] - reference_rejected_logps[key]
+        
         reject_num = len(rejected_logratios.keys())
         total_num = reject_num + 1
         logratios_dict = {}
@@ -297,6 +336,14 @@ class KPOTrainer(Trainer):
             else:
                 reject_key = f"rejected{i}"
                 logratios_dict[i] = rejected_logratios[reject_key]
+
+        debug_log("dpo_loss", "PROCESSING", {
+            "chosen_logratios": chosen_logratios,
+            "rejected_logratios_keys": list(rejected_logratios.keys()),
+            "reject_num": reject_num,
+            "total_num": total_num,
+            "logratios_dict_keys": list(logratios_dict.keys())
+        }, "Computed log ratios")
 
         temp_list = []
         for batch_idx in range(len(select_k)):
@@ -315,6 +362,13 @@ class KPOTrainer(Trainer):
         for key in policy_rejected_logps:
             rejected_rewards[key] = self.beta * (policy_rejected_logps[key] - reference_rejected_logps[key]).detach()
 
+        debug_log("dpo_loss", "OUTPUT", {
+            "losses": losses,
+            "chosen_rewards": chosen_rewards,
+            "rejected_rewards_keys": list(rejected_rewards.keys()),
+            "losses_mean": losses.mean().item()
+        }, "Final DPO loss computation")
+
         return losses, chosen_rewards, rejected_rewards
 
     def _get_batch_logps(
@@ -323,16 +377,15 @@ class KPOTrainer(Trainer):
         labels: torch.LongTensor,
         average_log_prob: bool = False,
     ) -> torch.FloatTensor:
-        """Compute the log probabilities of the given labels under the given logits.
-
-        Args:
-            logits: Logits of the model (unnormalized). Shape: (batch_size, sequence_length, vocab_size)
-            labels: Labels for which to compute the log probabilities. Label tokens with a value of label_pad_token_id are ignored. Shape: (batch_size, sequence_length)
-            average_log_prob: If True, return the average log probability per (non-masked) token. Otherwise, return the sum of the log probabilities of the (non-masked) tokens.
-
-        Returns:
-            A tensor of shape (batch_size,) containing the average/sum log probabilities of the given labels under the given logits.
-        """
+        """Compute the log probabilities of the given labels under the given logits."""
+        
+        debug_log("_get_batch_logps", "INPUT", {
+            "logits": logits,
+            "labels": labels,
+            "average_log_prob": average_log_prob,
+            "label_pad_token_id": self.label_pad_token_id
+        }, "Computing batch log probabilities")
+        
         if logits.shape[:-1] != labels.shape:
             raise ValueError("Logits (batch and sequence length dim) and labels must have the same shape.")
 
@@ -345,29 +398,59 @@ class KPOTrainer(Trainer):
 
         per_token_logps = torch.gather(logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
 
+        debug_log("_get_batch_logps", "PROCESSING", {
+            "labels_shape_after_shift": labels.shape,
+            "logits_shape_after_shift": logits.shape,
+            "loss_mask_sum": loss_mask.sum(-1),
+            "per_token_logps": per_token_logps
+        }, "Computed per-token log probabilities")
+
         if average_log_prob:
-            return (per_token_logps * loss_mask).sum(-1) / loss_mask.sum(-1)
+            result = (per_token_logps * loss_mask).sum(-1) / loss_mask.sum(-1)
         else:
-            return (per_token_logps * loss_mask).sum(-1)
+            result = (per_token_logps * loss_mask).sum(-1)
+        
+        debug_log("_get_batch_logps", "OUTPUT", {
+            "result": result,
+            "average_log_prob": average_log_prob
+        }, "Final log probabilities")
+        
+        return result
 
     def concatenated_forward(
         self, model: nn.Module, batch: Dict[str, Union[List, torch.LongTensor]]
     ) -> Tuple[torch.FloatTensor, Dict[str, torch.FloatTensor], torch.FloatTensor, Dict[str, torch.FloatTensor]]:
-        """Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
-
-        We do this to avoid doing two forward passes, because it's faster for FSDP.
-        """
+        """Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together."""
+        
+        debug_log("concatenated_forward", "INPUT", {
+            "model_type": type(model).__name__,
+            "batch_keys": list(batch.keys()),
+            "chosen_input_ids_shape": batch["chosen_input_ids"].shape if "chosen_input_ids" in batch else None
+        }, "Running concatenated forward pass")
+        
         concatenated_batch = self.concatenated_inputs(batch)
-        # print(concatenated_batch["concatenated_input_ids"].shape)
+        
+        debug_log("concatenated_forward", "AFTER_CONCATENATION", {
+            "concatenated_input_ids_shape": concatenated_batch["concatenated_input_ids"].shape,
+            "concatenated_attention_mask_shape": concatenated_batch["concatenated_attention_mask"].shape
+        }, "After input concatenation")
+        
         all_logits = model(
             concatenated_batch["concatenated_input_ids"],
             attention_mask=concatenated_batch["concatenated_attention_mask"],
         ).logits.to(torch.float32)
+        
+        debug_log("concatenated_forward", "AFTER_MODEL_FORWARD", {
+            "all_logits_shape": all_logits.shape,
+            "all_logits_dtype": all_logits.dtype
+        }, "After model forward pass")
+        
         all_logps = self._get_batch_logps(
             all_logits,
             concatenated_batch["concatenated_labels"],
             average_log_prob=False,
         )
+        
         chosen_logps = all_logps[: batch["chosen_input_ids"].shape[0]]
         step = batch["chosen_input_ids"].shape[0]
         rejected_logps = {}
@@ -384,6 +467,16 @@ class KPOTrainer(Trainer):
             if key.startswith("rejected") and key.endswith("_input_ids"):
                 cnt += 1
                 rejected_logits[f"rejected{cnt}"] = all_logits[step*cnt : step*(cnt+1)]
+        
+        debug_log("concatenated_forward", "OUTPUT", {
+            "chosen_logps": chosen_logps,
+            "rejected_logps_keys": list(rejected_logps.keys()),
+            "chosen_logits": chosen_logits,
+            "rejected_logits_keys": list(rejected_logits.keys()),
+            "step_size": step,
+            "rejected_count": cnt
+        }, "Final concatenated forward results")
+        
         return (chosen_logps, rejected_logps, chosen_logits, rejected_logits)
 
     def get_batch_metrics(
@@ -393,14 +486,27 @@ class KPOTrainer(Trainer):
         train_eval: Literal["train", "eval"] = "train",
     ):
         """Compute the DPO loss and other metrics for the given batch of inputs for train or test."""
+        
+        debug_log("get_batch_metrics", "INPUT", {
+            "model_type": type(model).__name__,
+            "batch_keys": list(batch.keys()),
+            "train_eval": train_eval
+        }, "Computing batch metrics")
+        
         metrics = {}
-        #print("[get_batch_metrics]batch = ", batch)
+        
         (
             policy_chosen_logps,
             policy_rejected_logps,
             policy_chosen_logits,
             policy_rejected_logits,
         ) = self.concatenated_forward(model, batch)
+        
+        debug_log("get_batch_metrics", "AFTER_POLICY_FORWARD", {
+            "policy_chosen_logps": policy_chosen_logps,
+            "policy_rejected_logps_keys": list(policy_rejected_logps.keys())
+        }, "After policy model forward pass")
+        
         with torch.no_grad():
             (
                 reference_chosen_logps,
@@ -408,6 +514,11 @@ class KPOTrainer(Trainer):
                 _,
                 _,
             ) = self.concatenated_forward(self.ref_model, batch)
+
+        debug_log("get_batch_metrics", "AFTER_REFERENCE_FORWARD", {
+            "reference_chosen_logps": reference_chosen_logps,
+            "reference_rejected_logps_keys": list(reference_rejected_logps.keys())
+        }, "After reference model forward pass")
 
         losses, chosen_rewards, rejected_rewards = self.dpo_loss(
             policy_chosen_logps,
@@ -438,6 +549,13 @@ class KPOTrainer(Trainer):
             metrics[f"{prefix}logits/rejected-{key}"] = policy_rejected_logits[key].detach().cpu().numpy().mean()
         metrics[f"{prefix}logits/chosen"] = policy_chosen_logits.detach().cpu().numpy().mean()
 
+        debug_log("get_batch_metrics", "OUTPUT", {
+            "losses_mean": losses.mean().item(),
+            "metrics_keys": list(metrics.keys()),
+            "chosen_rewards_mean": chosen_rewards.mean().item(),
+            "reward_accuracies_mean": reward_accuracies.mean().item() if reward_accuracies is not None else None
+        }, "Final batch metrics")
+
         return losses.mean(), metrics
 
     def compute_loss(
@@ -447,18 +565,31 @@ class KPOTrainer(Trainer):
         return_outputs=False,
         **kwargs,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, torch.Tensor]]]:
-        # print(inputs.keys())
-        # print(inputs)
+        
+        debug_log("compute_loss", "INPUT", {
+            "model_type": type(model).__name__,
+            "inputs_keys": list(inputs.keys()),
+            "return_outputs": return_outputs,
+            "use_dpo_data_collator": self.use_dpo_data_collator
+        }, "Computing loss")
+        
         if not self.use_dpo_data_collator:
             warnings.warn(
                 "compute_loss is only implemented for DPODataCollatorWithPadding, and you passed a datacollator that is different than "
                 "DPODataCollatorWithPadding - you might see unexpected behavior. Alternatively, you can implement your own prediction_step method if you are using a custom data collator"
             )
+        
         loss, metrics = self.get_batch_metrics(model, inputs, train_eval="train")
 
         # force log the metrics
         if self.accelerator.is_main_process:
             self.store_metrics(metrics, train_eval="train")
+
+        debug_log("compute_loss", "OUTPUT", {
+            "loss": loss.item() if hasattr(loss, 'item') else loss,
+            "metrics_keys": list(metrics.keys()),
+            "return_outputs": return_outputs
+        }, "Loss computation complete")
 
         if return_outputs:
             return (loss, metrics)
@@ -466,6 +597,12 @@ class KPOTrainer(Trainer):
 
     def generate_samples_for_evaluation(self, model, batch: Dict[str, torch.LongTensor]) -> Tuple[str, str]:
         """Generate samples from the model and reference model for the given batch of inputs."""
+
+        debug_log("generate_samples_for_evaluation", "INPUT", {
+            "model_type": type(model).__name__,
+            "batch_keys": list(batch.keys()),
+            "prompt_input_ids_shape": batch["prompt_input_ids"].shape if "prompt_input_ids" in batch else None
+        }, "Generating evaluation samples")
 
         policy_output = model.generate(
             batch["prompt_input_ids"],
@@ -489,6 +626,13 @@ class KPOTrainer(Trainer):
         reference_output = pad_to_length(reference_output, self.config.max_length, self.tokenizer.pad_token_id)
         reference_output_decoded = self.tokenizer.batch_decode(reference_output, skip_special_tokens=True)
 
+        debug_log("generate_samples_for_evaluation", "OUTPUT", {
+            "policy_output_shape": policy_output.shape,
+            "reference_output_shape": reference_output.shape,
+            "policy_output_decoded_length": len(policy_output_decoded),
+            "reference_output_decoded_length": len(reference_output_decoded)
+        }, "Generated evaluation samples")
+
         return policy_output_decoded, reference_output_decoded
 
     def prediction_step(
@@ -499,6 +643,14 @@ class KPOTrainer(Trainer):
         ignore_keys: Optional[List[str]] = None,
         **kwargs,
     ):
+        debug_log("prediction_step", "INPUT", {
+            "model_type": type(model).__name__,
+            "inputs_keys": list(inputs.keys()),
+            "prediction_loss_only": prediction_loss_only,
+            "ignore_keys": ignore_keys,
+            "use_dpo_data_collator": self.use_dpo_data_collator
+        }, "Running prediction step")
+        
         if not self.use_dpo_data_collator:
             warnings.warn(
                 "prediction_step is only implemented for DPODataCollatorWithPadding, and you passed a datacollator that is different than "
@@ -510,6 +662,10 @@ class KPOTrainer(Trainer):
             else:
                 ignore_keys = []
 
+        debug_log("prediction_step", "PROCESSING", {
+            "final_ignore_keys": ignore_keys
+        }, "Determined ignore keys")
+
         with torch.no_grad():
             loss, metrics = self.get_batch_metrics(model, inputs, train_eval="eval")
 
@@ -517,7 +673,18 @@ class KPOTrainer(Trainer):
         if self.accelerator.is_main_process:
             self.store_metrics(metrics, train_eval="eval")
 
+        debug_log("prediction_step", "AFTER_METRICS", {
+            "loss": loss.item() if hasattr(loss, 'item') else loss,
+            "metrics_keys": list(metrics.keys()),
+            "prediction_loss_only": prediction_loss_only
+        }, "Computed metrics for prediction")
+
         if prediction_loss_only:
+            debug_log("prediction_step", "OUTPUT", {
+                "loss": loss.detach(),
+                "logits": None,
+                "labels": None
+            }, "Returning loss only")
             return (loss.detach(), None, None)
 
         # logits for the chosen and rejected samples from model
@@ -529,11 +696,29 @@ class KPOTrainer(Trainer):
         logits = torch.stack(logits).mean(axis=1)
         labels = torch.zeros(logits.shape[0])
 
+        debug_log("prediction_step", "OUTPUT", {
+            "loss": loss.detach(),
+            "logits_shape": logits.shape,
+            "labels_shape": labels.shape,
+            "logits_dict_keys": list(logits_dict.keys())
+        }, "Final prediction step results")
+
         return (loss.detach(), logits, labels)
 
     def store_metrics(self, metrics: Dict[str, float], train_eval: Literal["train", "eval"] = "train") -> None:
+        debug_log("store_metrics", "INPUT", {
+            "metrics_keys": list(metrics.keys()),
+            "train_eval": train_eval,
+            "current_stored_metrics_keys": list(self._stored_metrics[train_eval].keys())
+        }, "Storing metrics")
+        
         for key, value in metrics.items():
             self._stored_metrics[train_eval][key].append(value)
+        
+        debug_log("store_metrics", "OUTPUT", {
+            "updated_stored_metrics_keys": list(self._stored_metrics[train_eval].keys()),
+            "stored_metrics_lengths": {k: len(v) for k, v in self._stored_metrics[train_eval].items()}
+        }, "Metrics stored successfully")
 
     def log(self, logs: Dict[str, float], *args, **kwargs) -> None:
         """
@@ -543,11 +728,38 @@ class KPOTrainer(Trainer):
             logs (`Dict[str, float]`):
                 The values to log.
         """
+        debug_log("log", "INPUT", {
+            "logs_keys": list(logs.keys()),
+            "train_eval_determination": "train" if "loss" in logs else "eval",
+            "args": args,
+            "kwargs": kwargs
+        }, "Logging metrics")
+        
         # logs either has 'loss' or 'eval_loss'
         train_eval = "train" if "loss" in logs else "eval"
+        
+        debug_log("log", "PROCESSING", {
+            "train_eval": train_eval,
+            "stored_metrics_keys": list(self._stored_metrics[train_eval].keys())
+        }, "Processing stored metrics")
+        
         # Add averaged stored metrics to logs
+        original_logs_keys = set(logs.keys())
         for key, metrics in self._stored_metrics[train_eval].items():
             logs[key] = torch.tensor(metrics).mean().item()
+        
+        debug_log("log", "AFTER_AVERAGING", {
+            "original_logs_keys": list(original_logs_keys),
+            "final_logs_keys": list(logs.keys()),
+            "added_keys": list(set(logs.keys()) - original_logs_keys)
+        }, "Added averaged metrics to logs")
+        
         del self._stored_metrics[train_eval]
+        
+        debug_log("log", "BEFORE_SUPER", {
+            "final_logs": {k: v for k, v in logs.items()}
+        }, "About to call parent log method")
+        
         super().log(logs, *args, **kwargs)
-
+        
+        debug_log("log", "OUTPUT", None, "Logging completed successfully")
