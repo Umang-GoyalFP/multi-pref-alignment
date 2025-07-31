@@ -36,6 +36,43 @@ def is_peft_available():
 if is_peft_available():
     from peft import get_peft_model#, prepare_model_for_int8_training
 
+import warnings
+from collections import defaultdict
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
+import importlib
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import RandomSampler, SequentialSampler
+from datasets import Dataset
+from transformers import DataCollator, PreTrainedModel, PreTrainedTokenizerBase, Trainer, TrainingArguments
+from transformers.trainer_callback import TrainerCallback
+import os
+import sys
+from ..utils.trainer_utils import DPODataCollatorWithPadding, pad_to_length
+
+def debug_print(func):
+    def wrapper(*args, **kwargs):
+        print(f"\n[CALL] {func.__name__}()")
+        print("Arguments:")
+        for i, arg in enumerate(args):
+            print(f" arg[{i}]: {type(arg)}")
+        print("Keyword arguments:")
+        for k, v in kwargs.items():
+            print(f" {k}: {type(v)}")
+        result = func(*args, **kwargs)
+        print(f"Return value: {type(result)}\n")
+        return result
+    return wrapper
+
+# Apply debug wrapper to every method in the class
+
+def debug_all_methods(cls):
+    for attr_name in dir(cls):
+        attr = getattr(cls, attr_name)
+        if callable(attr) and not attr_name.startswith("__"):
+            setattr(cls, attr_name, debug_print(attr))
+    return cls
 
 class KPOTrainer(Trainer):
     r"""
