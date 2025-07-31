@@ -30,7 +30,9 @@ import os
 import sys
 from ..utils.trainer_utils import DPODataCollatorWithPadding, pad_to_length
 
-
+print("="*60)
+print("[TEST] Debug logging is working!")
+print("="*60)
 def debug_log(func_name: str, stage: str, data: Any = None, extra_info: str = ""):
     """Enhanced debug logging function"""
     separator = "=" * 80
