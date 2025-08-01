@@ -11,6 +11,10 @@ import json
 import numpy as np
 
 def setup_model(model_id, quantized):
+    # Create offload directory if it doesn't exist
+    offload_dir = "./offload"
+    os.makedirs(offload_dir, exist_ok=True)
+    
     if quantized:
         print("Loading quantized model...")
         quantization_config = BitsAndBytesConfig(
@@ -18,8 +22,6 @@ def setup_model(model_id, quantized):
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.float16,
             llm_int8_enable_fp32_cpu_offload=True,
-            offload_folder="offload",
-            offload_state_dict=True,
         )
         torch_dtype = torch.bfloat16
         device_map = "auto" if torch.cuda.is_available() else "cpu"
@@ -30,12 +32,17 @@ def setup_model(model_id, quantized):
             device_map=device_map,
             trust_remote_code=True,
             torch_dtype=torch_dtype,
+            offload_folder=offload_dir,
+            use_safetensors=True,
         )
     else:
+        print("Loading full precision model...")
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             torch_dtype=torch.float16,
-            device_map="auto"
+            device_map="auto",
+            offload_folder=offload_dir,
+            use_safetensors=True,
         )
     
     tokenizer = AutoTokenizer.from_pretrained(model_id)
