@@ -126,8 +126,6 @@ def get_eval_prompt(subset_name, instruction, response, prompt_idx=0):
         "Review the solution to the math problem below. Is the reasoning sound and the final answer correct? Answer Yes or No."
     ]
 }
-
-
     prompt_list = prompts.get(subset_name, prompts['alpacaeval-easy'])
     prompt_template = prompt_list[prompt_idx]
 
