@@ -69,12 +69,16 @@ def generate_entropy(model, tokenizer, text, debug=False):
                 print(f"Logits shape: {logits.shape}")
                 print(f"Text length: {len(text)}")
                 print(f"Token count: {inputs.input_ids.shape[1]}")
+                print(f"Logits range: [{torch.min(logits).item():.3f}, {torch.max(logits).item():.3f}]")
             
             # Calculate entropy for each position (skip the last position as it has no next token)
             entropies = []
-            for pos in range(logits.shape[0] - 1):  # Skip last position
+            for pos in range(min(logits.shape[0] - 1, 10)):  # Limit to first 10 positions for debugging
                 # Apply softmax with numerical stability
-                logits_pos = logits[pos]
+                logits_pos = logits[pos].float()  # Ensure float32 for stability
+                
+                if debug and pos < 3:
+                    print(f"Position {pos} - Logits range: [{torch.min(logits_pos).item():.3f}, {torch.max(logits_pos).item():.3f}]")
                 
                 # Check for invalid logits
                 if torch.isnan(logits_pos).any() or torch.isinf(logits_pos).any():
@@ -82,10 +86,13 @@ def generate_entropy(model, tokenizer, text, debug=False):
                         print(f"Warning: Invalid logits at position {pos}")
                     continue
                 
-                # Numerical stable softmax
-                max_logit = torch.max(logits_pos)
-                exp_logits = torch.exp(logits_pos - max_logit)
-                probs = exp_logits / torch.sum(exp_logits)
+                # Use PyTorch's built-in log_softmax for numerical stability
+                log_probs = torch.log_softmax(logits_pos, dim=-1)
+                probs = torch.softmax(logits_pos, dim=-1)
+                
+                if debug and pos < 3:
+                    print(f"Position {pos} - Probs range: [{torch.min(probs).item():.6f}, {torch.max(probs).item():.6f}]")
+                    print(f"Position {pos} - Log probs range: [{torch.min(log_probs).item():.3f}, {torch.max(log_probs).item():.3f}]")
                 
                 # Check for invalid probabilities
                 if torch.isnan(probs).any() or torch.isinf(probs).any():
@@ -93,14 +100,21 @@ def generate_entropy(model, tokenizer, text, debug=False):
                         print(f"Warning: Invalid probabilities at position {pos}")
                     continue
                 
-                # Calculate entropy with numerical stability
-                log_probs = torch.log(probs + 1e-12)
+                if torch.isnan(log_probs).any() or torch.isinf(log_probs).any():
+                    if debug:
+                        print(f"Warning: Invalid log probabilities at position {pos}")
+                    continue
+                
+                # Calculate entropy: -sum(p * log(p))
                 entropy = -torch.sum(probs * log_probs).item()
                 
+                if debug and pos < 3:
+                    print(f"Position {pos} - Entropy: {entropy}")
+                
                 # Check if entropy is valid
-                if not np.isfinite(entropy):
+                if not np.isfinite(entropy) or entropy < 0:
                     if debug:
-                        print(f"Warning: Non-finite entropy at position {pos}: {entropy}")
+                        print(f"Warning: Invalid entropy at position {pos}: {entropy}")
                     continue
                 
                 entropies.append(entropy)
@@ -114,14 +128,17 @@ def generate_entropy(model, tokenizer, text, debug=False):
             mean_entropy = sum(entropies) / len(entropies)
             
             if debug:
-                print(f"Valid entropy positions: {len(entropies)}")
-                print(f"Mean entropy: {mean_entropy}")
+                print(f"Valid entropy positions: {len(entropies)}/{min(logits.shape[0] - 1, 10)}")
+                print(f"Individual entropies: {[f'{e:.3f}' for e in entropies[:5]]}")
+                print(f"Mean entropy: {mean_entropy:.6f}")
             
             return mean_entropy
             
     except Exception as e:
         if debug:
             print(f"Error in entropy calculation: {str(e)}")
+            import traceback
+            traceback.print_exc()
         return float('nan')
 
 def evaluate_rewards(ds, model, tokenizer, dataset_name, debug_first_few=5):
