@@ -42,42 +42,64 @@ def setup_model(model_id, quantized):
     tokenizer.pad_token_id = tokenizer.eos_token_id
     return model, tokenizer
 
-def generate_entropy(model, tokenizer, text, debug=False):
-    """Calculate mean entropy across the entire sequence with better error handling"""
+def generate_response_entropy(model, tokenizer, prompt, response, debug=False):
+    """Calculate entropy only for response tokens, excluding the prompt"""
     try:
         # Ensure text is not empty
-        if not text or not text.strip():
+        if not response or not response.strip():
             if debug:
-                print(f"Warning: Empty text input")
+                print(f"Warning: Empty response input")
             return float('nan')
         
-        inputs = tokenizer(text, return_tensors="pt", max_length=1024, truncation=True)
-        
-        # Check if tokenization produced valid tokens
-        if inputs.input_ids.shape[1] == 0:
+        if not prompt or not prompt.strip():
             if debug:
-                print(f"Warning: Tokenization produced no tokens")
+                print(f"Warning: Empty prompt input")
             return float('nan')
         
-        inputs = inputs.to(model.device)
+        # Tokenize prompt and full text separately
+        prompt_inputs = tokenizer(prompt, return_tensors="pt", max_length=512, truncation=True)
+        full_text = prompt + response
+        full_inputs = tokenizer(full_text, return_tensors="pt", max_length=1024, truncation=True)
+        
+        prompt_length = prompt_inputs.input_ids.shape[1]
+        full_length = full_inputs.input_ids.shape[1]
+        
+        # Check if we have response tokens
+        if full_length <= prompt_length:
+            if debug:
+                print(f"Warning: No response tokens found (prompt: {prompt_length}, full: {full_length})")
+            return float('nan')
+        
+        response_length = full_length - prompt_length
+        
+        if debug:
+            print(f"Prompt tokens: {prompt_length}")
+            print(f"Response tokens: {response_length}")
+            print(f"Total tokens: {full_length}")
+        
+        full_inputs = full_inputs.to(model.device)
         
         with torch.no_grad():
-            outputs = model(**inputs)
+            outputs = model(**full_inputs)
             logits = outputs.logits[0]  # Remove batch dimension
             
             if debug:
                 print(f"Logits shape: {logits.shape}")
-                print(f"Text length: {len(text)}")
-                print(f"Token count: {inputs.input_ids.shape[1]}")
-                print(f"Logits range: [{torch.min(logits).item():.3f}, {torch.max(logits).item():.3f}]")
             
-            # Calculate entropy for each position (skip the last position as it has no next token)
+            # Calculate entropy only for response positions
+            # Start from prompt_length-1 (to predict first response token) to full_length-1
             entropies = []
-            for pos in range(min(logits.shape[0] - 1, 10)):  # Limit to first 10 positions for debugging
+            start_pos = max(0, prompt_length - 1)  # Position that predicts first response token
+            end_pos = min(logits.shape[0] - 1, full_length - 1)  # Don't go beyond available logits
+            
+            if debug:
+                print(f"Calculating entropy from position {start_pos} to {end_pos}")
+            
+            for pos in range(start_pos, end_pos):
                 # Apply softmax with numerical stability
                 logits_pos = logits[pos].float()  # Ensure float32 for stability
                 
-                if debug and pos < 3:
+                if debug and pos < start_pos + 3:
                     print(f"Position {pos} - Logits range: [{torch.min(logits_pos).item():.3f}, {torch.max(logits_pos).item():.3f}]")
                 
                 # Check for invalid logits
@@ -90,9 +112,8 @@ def generate_entropy(model, tokenizer, text, debug=False):
                 log_probs = torch.log_softmax(logits_pos, dim=-1)
                 probs = torch.softmax(logits_pos, dim=-1)
                 
-                if debug and pos < 3:
+                if debug and pos < start_pos + 3:
                     print(f"Position {pos} - Probs range: [{torch.min(probs).item():.6f}, {torch.max(probs).item():.6f}]")
-                    print(f"Position {pos} - Log probs range: [{torch.min(log_probs).item():.3f}, {torch.max(log_probs).item():.3f}]")
                 
                 # Check for invalid probabilities
                 if torch.isnan(probs).any() or torch.isinf(probs).any():
@@ -108,8 +129,8 @@ def generate_entropy(model, tokenizer, text, debug=False):
                 # Calculate entropy: -sum(p * log(p))
                 entropy = -torch.sum(probs * log_probs).item()
                 
-                if debug and pos < 3:
-                    print(f"Position {pos} - Entropy: {entropy}")
+                if debug and pos < start_pos + 3:
+                    print(f"Position {pos} - Entropy: {entropy:.6f}")
                 
                 # Check if entropy is valid
                 if not np.isfinite(entropy) or entropy < 0:
@@ -121,22 +142,22 @@ def generate_entropy(model, tokenizer, text, debug=False):
             
             if not entropies:
                 if debug:
-                    print("Warning: No valid entropies calculated")
+                    print("Warning: No valid response entropies calculated")
                 return float('nan')
             
-            # Return mean entropy across sequence
+            # Return mean entropy across response sequence
             mean_entropy = sum(entropies) / len(entropies)
             
             if debug:
-                print(f"Valid entropy positions: {len(entropies)}/{min(logits.shape[0] - 1, 10)}")
-                print(f"Individual entropies: {[f'{e:.3f}' for e in entropies[:5]]}")
-                print(f"Mean entropy: {mean_entropy:.6f}")
+                print(f"Valid response entropy positions: {len(entropies)}/{end_pos - start_pos}")
+                print(f"Response entropies (first 5): {[f'{e:.3f}' for e in entropies[:5]]}")
+                print(f"Mean response entropy: {mean_entropy:.6f}")
             
             return mean_entropy
             
     except Exception as e:
         if debug:
-            print(f"Error in entropy calculation: {str(e)}")
+            print(f"Error in response entropy calculation: {str(e)}")
             import traceback
             traceback.print_exc()
         return float('nan')
@@ -151,7 +172,7 @@ def evaluate_rewards(ds, model, tokenizer, dataset_name, debug_first_few=5):
     entropy_samples.update({f'rejected_{level}': [] for level in levels})
 
     print(f"\n{'='*80}")
-    print(f"STARTING ENTROPY CALCULATION FOR: {dataset_name}")
+    print(f"STARTING RESPONSE ENTROPY CALCULATION FOR: {dataset_name}")
     print("="*80)
 
     for idx, item in enumerate(tqdm(ds)):
@@ -171,18 +192,18 @@ def evaluate_rewards(ds, model, tokenizer, dataset_name, debug_first_few=5):
             
             if debug:
                 print(f"\nLevel {level}:")
-                print(f"  Chosen length: {len(chosen_response)} chars")
-                print(f"  Rejected length: {len(rejected_response)} chars")
+                print(f"  Chosen response length: {len(chosen_response)} chars")
+                print(f"  Rejected response length: {len(rejected_response)} chars")
                 print(f"  Chosen preview: {chosen_response[:150]}...")
                 print(f"  Rejected preview: {rejected_response[:150]}...")
             
-            # Calculate entropy for both responses
-            chosen_entropy = generate_entropy(model, tokenizer, chosen_response, debug=debug and level==1)
-            rejected_entropy = generate_entropy(model, tokenizer, rejected_response, debug=debug and level==1)
+            # Calculate entropy for both responses (only response tokens, not prompt)
+            chosen_entropy = generate_response_entropy(model, tokenizer, prompt, chosen_response, debug=debug and level==1)
+            rejected_entropy = generate_response_entropy(model, tokenizer, prompt, rejected_response, debug=debug and level==1)
             
             if debug:
-                print(f"  ✓ Chosen entropy: {chosen_entropy:.4f}" if not np.isnan(chosen_entropy) else f"  ✗ Chosen entropy: {chosen_entropy}")
-                print(f"  ✓ Rejected entropy: {rejected_entropy:.4f}" if not np.isnan(rejected_entropy) else f"  ✗ Rejected entropy: {rejected_entropy}")
+                print(f"  ✓ Chosen response entropy: {chosen_entropy:.4f}" if not np.isnan(chosen_entropy) else f"  ✗ Chosen response entropy: {chosen_entropy}")
+                print(f"  ✓ Rejected response entropy: {rejected_entropy:.4f}" if not np.isnan(rejected_entropy) else f"  ✗ Rejected response entropy: {rejected_entropy}")
                 
                 if not (np.isnan(chosen_entropy) or np.isnan(rejected_entropy)):
                     winner = "CHOSEN" if chosen_entropy < rejected_entropy else "REJECTED"
@@ -214,7 +235,7 @@ def evaluate_rewards(ds, model, tokenizer, dataset_name, debug_first_few=5):
         # Print entropy statistics after first 20 samples
         if idx == 19:  # After 20 entries
             print(f"\n{'='*60}")
-            print("ENTROPY STATISTICS (First 20 valid samples):")
+            print("RESPONSE ENTROPY STATISTICS (First 20 valid samples):")
             print("="*60)
             
             for level in levels:
@@ -313,9 +334,11 @@ def main(args):
     model, tokenizer = setup_model(args.model_name, args.quantized)
     
     # Test entropy calculation with a simple example
-    print("Testing entropy calculation...")
-    test_entropy = generate_entropy(model, tokenizer, "Hello world, this is a test.", debug=True)
-    print(f"Test entropy: {test_entropy}")
+    print("Testing response entropy calculation...")
+    test_prompt = "What is the capital of France?"
+    test_response = " The capital of France is Paris."
+    test_entropy = generate_response_entropy(model, tokenizer, test_prompt, test_response, debug=True)
+    print(f"Test response entropy: {test_entropy}")
     
     datasets = [
         "Ayush-Singh/RM-Bench-chat",
@@ -343,7 +366,17 @@ def main(args):
         save_entropy_data(processed_data, dataset_name, args.model_name)
         
         # Extract dataset name for local saving
-        name_match = re.search(r'/([^/]+)$', dataset_name)
+        name_match = re.search(r'/([^/]+)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Infer rewards using entropy and push results to Hugging Face Hub")
+    parser.add_argument("--hf_key", type=str, required=True, help="Hugging Face API key")
+    parser.add_argument("--hf_user", type=str, required=True, help="Hugging Face user name to push datasets")
+    parser.add_argument("--model_name", type=str, required=True, help="Name of the model on Hugging Face")
+    parser.add_argument("--quantized", action="store_true", help="Use quantized model for inference")
+    args = parser.parse_args()
+
+    main(args), dataset_name)
         if name_match:
             name = name_match.group(1)
         else:
@@ -353,12 +386,12 @@ def main(args):
         processed_dataset = Dataset.from_list(processed_data)
         
         # Save locally instead of pushing to hub (for testing)
-        local_path = f"{name}-{args.model_name.split('/')[-1]}-entropy"
+        local_path = f"{name}-{args.model_name.split('/')[-1]}-response-entropy"
         processed_dataset.save_to_disk(local_path)
         print(f"Dataset saved locally to: {local_path}")
         
         # Uncomment below when HF token permissions are fixed
-        # processed_dataset.push_to_hub(f"{args.hf_user}/{name}-{args.model_name.split('/')[-1]}-entropy")
+        # processed_dataset.push_to_hub(f"{args.hf_user}/{name}-{args.model_name.split('/')[-1]}-response-entropy")
 
     save_all_accuracies_to_json(all_accuracies, args.model_name)
     save_combined_entropy_data(all_processed_data, args.model_name)
