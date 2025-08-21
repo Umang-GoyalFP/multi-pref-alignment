@@ -98,12 +98,34 @@ def evaluate_rewards(ds, model, tokenizer, dataset_name):
 
     return accuracies, processed_data
 
+def save_entropy_data(processed_data, dataset_name, model_name):
+    """Save entropy data to JSON file for each dataset"""
+    # Extract dataset name for filename
+    name_match = re.search(r'/([^/]+)$', dataset_name)
+    if name_match:
+        name = name_match.group(1)
+    else:
+        name = dataset_name.replace('/', '_')
+    
+    filename = f"entropy_data_{name}_{model_name.split('/')[-1]}.json"
+    
+    with open(filename, 'w') as f:
+        json.dump(processed_data, f, indent=2)
+    print(f"Entropy data saved to {filename}")
+
 def save_all_accuracies_to_json(all_accuracies, model_name):
     """Save accuracies to JSON file"""
     filename = f"accuracy-rm-bench-{model_name.split('/')[-1]}-entropy.json"
     with open(filename, 'w') as f:
         json.dump(all_accuracies, f, indent=4)
     print(f"All accuracies saved to {filename}")
+
+def save_combined_entropy_data(all_processed_data, model_name):
+    """Save all entropy data combined into one file"""
+    filename = f"combined_entropy_data_{model_name.split('/')[-1]}.json"
+    with open(filename, 'w') as f:
+        json.dump(all_processed_data, f, indent=2)
+    print(f"Combined entropy data saved to {filename}")
 
 def main(args):
     login(args.hf_key)
@@ -130,6 +152,9 @@ def main(args):
         for level, acc in accuracies.items():
             print(f"Accuracy for {dataset_name} - {level}: {acc:.2f}%")
         
+        # Save entropy data for this dataset
+        save_entropy_data(processed_data, dataset_name, args.model_name)
+        
         # Extract dataset name for local saving
         name_match = re.search(r'/([^/]+)$', dataset_name)
         if name_match:
@@ -149,6 +174,8 @@ def main(args):
         # processed_dataset.push_to_hub(f"{args.hf_user}/{name}-{args.model_name.split('/')[-1]}-entropy")
 
     save_all_accuracies_to_json(all_accuracies, args.model_name)
+    save_combined_entropy_data(all_processed_data, args.model_name)
+    
     del model
     gc.collect()
     
