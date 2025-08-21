@@ -1,6 +1,49 @@
-def generate_sequence_entropy(model, tokenizer, text):
-    """Calculate entropy across the entire sequence, not just last token"""
-    inputs = tokenizer(text, return_tensors="pt", max_length=512, truncation=True).to(model.device)
+import argparse
+import os
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from huggingface_hub import login
+from datasets import Dataset, load_dataset
+from tqdm import tqdm
+import re
+import gc
+import json
+
+def setup_model(model_id, quantized):
+    if quantized:
+        print("Loading quantized model...")
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16,
+            llm_int8_enable_fp32_cpu_offload=True,
+            offload_folder="offload",
+            offload_state_dict=True,
+        )
+        torch_dtype = torch.bfloat16
+        device_map = "auto" if torch.cuda.is_available() else "cpu"
+
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            quantization_config=quantization_config,
+            device_map=device_map,
+            trust_remote_code=True,
+            torch_dtype=torch_dtype,
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype=torch.float16,
+            device_map="auto"
+        )
+    
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+    return model, tokenizer
+
+def generate_entropy(model, tokenizer, text):
+    """Calculate mean entropy across the entire sequence"""
+    inputs = tokenizer(text, return_tensors="pt", max_length=1024, truncation=True).to(model.device)
     
     with torch.no_grad():
         outputs = model(**inputs)
@@ -15,17 +58,6 @@ def generate_sequence_entropy(model, tokenizer, text):
         
         # Return mean entropy across sequence
         return sum(entropies) / len(entropies)
-
-def generate_perplexity(model, tokenizer, text):
-    """Alternative: Use perplexity instead of entropy"""
-    inputs = tokenizer(text, return_tensors="pt", max_length=512, truncation=True).to(model.device)
-    
-    with torch.no_grad():
-        outputs = model(**inputs, labels=inputs["input_ids"])
-        loss = outputs.loss
-        perplexity = torch.exp(loss).item()
-    
-    return perplexity
 
 def evaluate_rewards(ds, model, tokenizer, dataset_name):
     levels = [1, 2, 3]
@@ -42,30 +74,18 @@ def evaluate_rewards(ds, model, tokenizer, dataset_name):
             chosen_response = item[chosen_key]
             rejected_response = item[rejected_key]
             
-            # Calculate both entropy and perplexity for comparison
-            chosen_entropy = generate_sequence_entropy(model, tokenizer, chosen_response)
-            rejected_entropy = generate_sequence_entropy(model, tokenizer, rejected_response)
+            # Calculate entropy for both responses
+            chosen_entropy = generate_entropy(model, tokenizer, chosen_response)
+            rejected_entropy = generate_entropy(model, tokenizer, rejected_response)
             
-            chosen_perplexity = generate_perplexity(model, tokenizer, chosen_response)
-            rejected_perplexity = generate_perplexity(model, tokenizer, rejected_response)
-            
-            # Store all metrics
+            # Store entropy values
             item[f'chosen_{level}_entropy'] = chosen_entropy
             item[f'rejected_{level}_entropy'] = rejected_entropy
-            item[f'chosen_{level}_perplexity'] = chosen_perplexity
-            item[f'rejected_{level}_perplexity'] = rejected_perplexity
             
             results[f'level_{level}']['total'] += 1
             
-            # DECISION: Which metric to use for "correctness"?
-            # Option 1: Lower entropy (more confident)
-            entropy_prefers_chosen = chosen_entropy < rejected_entropy
-            
-            # Option 2: Lower perplexity (more likely under model)
-            perplexity_prefers_chosen = chosen_perplexity < rejected_perplexity
-            
-            # You could use either or combine them
-            if entropy_prefers_chosen:  # or perplexity_prefers_chosen
+            # Lower entropy is better (more confident/certain response)
+            if chosen_entropy < rejected_entropy:
                 results[f'level_{level}']['correct'] += 1
 
         processed_data.append(item)
@@ -106,11 +126,20 @@ def main(args):
         for level, acc in accuracies.items():
             print(f"Accuracy for {dataset_name} - {level}: {acc:.2f}%")
         
-        name = re.search(r'/([^/]+)
-, dataset_name).group(1)
+        name = re.search(r'/([^/]+)$', dataset_name).group(1)
         processed_dataset = Dataset.from_list(processed_data)
         processed_dataset.push_to_hub(f"{args.hf_user}/{name}-{args.model_name.split('/')[-1]}-entropy")
 
-    save_all_accuracies_to_json(all_accuracies, args.model_name)
+    save_all_accuracies_to_json(all_accuracies, model_name)
     del model
     gc.collect()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Infer rewards using entropy and push results to Hugging Face Hub")
+    parser.add_argument("--hf_key", type=str, required=True, help="Hugging Face API key")
+    parser.add_argument("--hf_user", type=str, required=True, help="Hugging Face user name to push datasets")
+    parser.add_argument("--model_name", type=str, required=True, help="Name of the model on Hugging Face")
+    parser.add_argument("--quantized", action="store_true", help="Use quantized model for inference")
+    args = parser.parse_args()
+
+    main(args)
