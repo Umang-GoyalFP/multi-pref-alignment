@@ -276,7 +276,117 @@ def evaluate_rewards(ds, model, tokenizer, dataset_name, debug_first_few=5):
 def save_entropy_data(processed_data, dataset_name, model_name):
     """Save entropy data to JSON file for each dataset"""
     # Extract dataset name for filename
-    name_match = re.search(r'/([^/]+)$', dataset_name)
+    name_match = re.search(r'/([^/]+)
+
+def save_all_accuracies_to_json(all_accuracies, model_name):
+    """Save accuracies to JSON file"""
+    filename = f"accuracy-rm-bench-{model_name.split('/')[-1]}-entropy.json"
+    with open(filename, 'w') as f:
+        json.dump(all_accuracies, f, indent=4)
+    print(f"All accuracies saved to {filename}")
+
+def save_combined_entropy_data(all_processed_data, model_name):
+    """Save all entropy data combined into one file"""
+    filename = f"combined_entropy_data_{model_name.split('/')[-1]}.json"
+    
+    # Convert nan values to null for JSON serialization
+    def convert_nan(obj):
+        if isinstance(obj, dict):
+            return {k: convert_nan(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_nan(v) for v in obj]
+        elif isinstance(obj, float) and np.isnan(obj):
+            return None
+        else:
+            return obj
+    
+    all_processed_data_clean = convert_nan(all_processed_data)
+    
+    with open(filename, 'w') as f:
+        json.dump(all_processed_data_clean, f, indent=2)
+    print(f"Combined entropy data saved to {filename}")
+
+def main(args):
+    login(args.hf_key)
+    model, tokenizer = setup_model(args.model_name, args.quantized)
+    
+    # Test entropy calculation with a simple example
+    print("Testing response entropy calculation...")
+    test_prompt = "What is the capital of France?"
+    test_response = " The capital of France is Paris."
+    test_entropy = generate_response_entropy(model, tokenizer, test_prompt, test_response, debug=True)
+    print(f"Test response entropy: {test_entropy}")
+    
+    datasets = [
+        "Ayush-Singh/RM-Bench-chat",
+        "Ayush-Singh/RM-Bench-code", 
+        "Ayush-Singh/RM-Bench-math",
+        "Ayush-Singh/RM-Bench-safety-response",
+        "Ayush-Singh/RM-Bench-safety-refuse",
+    ]
+    
+    all_accuracies = {}
+    all_processed_data = []
+    
+    for dataset_name in datasets:
+        print(f"Processing dataset: {dataset_name}")
+        dataset = load_dataset(dataset_name)['train']
+        accuracies, processed_data = evaluate_rewards(dataset, model, tokenizer, dataset_name)
+        
+        all_accuracies[dataset_name] = accuracies
+        all_processed_data.extend(processed_data)
+        
+        for level, acc in accuracies.items():
+            print(f"Accuracy for {dataset_name} - {level}: {acc:.2f}%")
+        
+        # Save entropy data for this dataset
+        save_entropy_data(processed_data, dataset_name, args.model_name)
+        
+        # Extract dataset name for local saving
+        name_match = re.search(r'/([^/]+)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Infer rewards using entropy and push results to Hugging Face Hub")
+    parser.add_argument("--hf_key", type=str, required=True, help="Hugging Face API key")
+    parser.add_argument("--hf_user", type=str, required=True, help="Hugging Face user name to push datasets")
+    parser.add_argument("--model_name", type=str, required=True, help="Name of the model on Hugging Face")
+    parser.add_argument("--quantized", action="store_true", help="Use quantized model for inference")
+    args = parser.parse_args()
+
+    main(args), dataset_name)
+        if name_match:
+            name = name_match.group(1)
+        else:
+            name = dataset_name.replace('/', '_')
+        
+        # Create processed dataset
+        processed_dataset = Dataset.from_list(processed_data)
+        
+        # Save locally instead of pushing to hub (for testing)
+        local_path = f"{name}-{args.model_name.split('/')[-1]}-response-entropy"
+        processed_dataset.save_to_disk(local_path)
+        print(f"Dataset saved locally to: {local_path}")
+        
+        # Uncomment below when HF token permissions are fixed
+        # processed_dataset.push_to_hub(f"{args.hf_user}/{name}-{args.model_name.split('/')[-1]}-response-entropy")
+
+    save_all_accuracies_to_json(all_accuracies, args.model_name)
+    save_combined_entropy_data(all_processed_data, args.model_name)
+    
+    del model
+    gc.collect()
+    
+    return all_processed_data, datasets
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Infer rewards using entropy and push results to Hugging Face Hub")
+    parser.add_argument("--hf_key", type=str, required=True, help="Hugging Face API key")
+    parser.add_argument("--hf_user", type=str, required=True, help="Hugging Face user name to push datasets")
+    parser.add_argument("--model_name", type=str, required=True, help="Name of the model on Hugging Face")
+    parser.add_argument("--quantized", action="store_true", help="Use quantized model for inference")
+    args = parser.parse_args()
+
+    main(args), dataset_name)
     if name_match:
         name = name_match.group(1)
     else:
