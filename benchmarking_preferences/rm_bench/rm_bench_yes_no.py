@@ -116,35 +116,29 @@ def main(args):
         "Ayush-Singh/RM-Bench-safety-refuse",
     ]
     
-    all_accuracies = {}      
+    all_accuracies = {}
+    all_processed_data = []
+    
     for dataset_name in datasets:
         print(f"Processing dataset: {dataset_name}")
         dataset = load_dataset(dataset_name)['train']
         accuracies, processed_data = evaluate_rewards(dataset, model, tokenizer, dataset_name)
         
-        all_accuracies[dataset_name] = accuracies  
+        all_accuracies[dataset_name] = accuracies
+        all_processed_data.extend(processed_data)
+        
         for level, acc in accuracies.items():
             print(f"Accuracy for {dataset_name} - {level}: {acc:.2f}%")
         
-        name = re.search(r'/([^/]+)$')
-
-    save_all_accuracies_to_json(all_accuracies, model_name)
-    del model
-    gc.collect()
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Infer rewards using entropy and push results to Hugging Face Hub")
-    parser.add_argument("--hf_key", type=str, required=True, help="Hugging Face API key")
-    parser.add_argument("--hf_user", type=str, required=True, help="Hugging Face user name to push datasets")
-    parser.add_argument("--model_name", type=str, required=True, help="Name of the model on Hugging Face")
-    parser.add_argument("--quantized", action="store_true", help="Use quantized model for inference")
-    args = parser.parse_args()
-
-    # 🔹 Assuming main returns (processed_data, dataset_name)
-    processed_data, dataset_name = main(args)
-
-    processed_dataset = Dataset.from_list(processed_data)
-
+        # Extract dataset name for local saving
+        name_match = re.search(r'/([^/]+)$', dataset_name)
+        if name_match:
+            name = name_match.group(1)
+        else:
+            name = dataset_name.replace('/', '_')
+        
+        # Create processed dataset
+        processed_dataset = Dataset.from_list(processed_data)
         
         # Save locally instead of pushing to hub (for testing)
         local_path = f"{name}-{args.model_name.split('/')[-1]}-entropy"
@@ -154,9 +148,11 @@ if __name__ == "__main__":
         # Uncomment below when HF token permissions are fixed
         # processed_dataset.push_to_hub(f"{args.hf_user}/{name}-{args.model_name.split('/')[-1]}-entropy")
 
-    save_all_accuracies_to_json(all_accuracies, model_name)
+    save_all_accuracies_to_json(all_accuracies, args.model_name)
     del model
     gc.collect()
+    
+    return all_processed_data, datasets
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Infer rewards using entropy and push results to Hugging Face Hub")
