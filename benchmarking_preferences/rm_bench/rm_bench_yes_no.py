@@ -140,8 +140,11 @@ if __name__ == "__main__":
     parser.add_argument("--quantized", action="store_true", help="Use quantized model for inference")
     args = parser.parse_args()
 
-    main(args), dataset_name).group(1)
-        processed_dataset = Dataset.from_list(processed_data)
+    # 🔹 Assuming main returns (processed_data, dataset_name)
+    processed_data, dataset_name = main(args)
+
+    processed_dataset = Dataset.from_list(processed_data)
+
         
         # Save locally instead of pushing to hub (for testing)
         local_path = f"{name}-{args.model_name.split('/')[-1]}-entropy"
