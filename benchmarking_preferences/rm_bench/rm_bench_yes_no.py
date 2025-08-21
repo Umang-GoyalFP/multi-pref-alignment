@@ -126,9 +126,30 @@ def main(args):
         for level, acc in accuracies.items():
             print(f"Accuracy for {dataset_name} - {level}: {acc:.2f}%")
         
-        name = re.search(r'/([^/]+)$', dataset_name).group(1)
+        name = re.search(r'/([^/]+)
+
+    save_all_accuracies_to_json(all_accuracies, model_name)
+    del model
+    gc.collect()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Infer rewards using entropy and push results to Hugging Face Hub")
+    parser.add_argument("--hf_key", type=str, required=True, help="Hugging Face API key")
+    parser.add_argument("--hf_user", type=str, required=True, help="Hugging Face user name to push datasets")
+    parser.add_argument("--model_name", type=str, required=True, help="Name of the model on Hugging Face")
+    parser.add_argument("--quantized", action="store_true", help="Use quantized model for inference")
+    args = parser.parse_args()
+
+    main(args), dataset_name).group(1)
         processed_dataset = Dataset.from_list(processed_data)
-        processed_dataset.push_to_hub(f"{args.hf_user}/{name}-{args.model_name.split('/')[-1]}-entropy")
+        
+        # Save locally instead of pushing to hub (for testing)
+        local_path = f"{name}-{args.model_name.split('/')[-1]}-entropy"
+        processed_dataset.save_to_disk(local_path)
+        print(f"Dataset saved locally to: {local_path}")
+        
+        # Uncomment below when HF token permissions are fixed
+        # processed_dataset.push_to_hub(f"{args.hf_user}/{name}-{args.model_name.split('/')[-1]}-entropy")
 
     save_all_accuracies_to_json(all_accuracies, model_name)
     del model
