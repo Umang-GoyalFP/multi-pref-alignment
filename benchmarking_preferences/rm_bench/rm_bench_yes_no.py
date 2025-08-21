@@ -126,7 +126,7 @@ def main(args):
         for level, acc in accuracies.items():
             print(f"Accuracy for {dataset_name} - {level}: {acc:.2f}%")
         
-        name = re.search(r'/([^/]+)
+        name = re.search(r'/([^/]+)$')
 
     save_all_accuracies_to_json(all_accuracies, model_name)
     del model
