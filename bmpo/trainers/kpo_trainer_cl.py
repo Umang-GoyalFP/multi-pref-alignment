@@ -119,6 +119,7 @@ class KPOTrainer(Trainer):
         model: Union[PreTrainedModel, nn.Module] = None,
         ref_model: Union[PreTrainedModel, nn.Module] = None,
         beta: float = 0.1,
+        lambda_entropy: float=0.1,
         args: TrainingArguments = None,
         data_collator: Optional[DataCollator] = None,
         label_pad_token_id: int = -100,
@@ -140,6 +141,7 @@ class KPOTrainer(Trainer):
     ):
         debug_log("__init__", "INPUT", {
             "beta": beta,
+            "lambda_entropy":lambda_entropy,
             "label_pad_token_id": label_pad_token_id,
             "padding_value": padding_value,
             "truncation_mode": truncation_mode,
@@ -205,6 +207,7 @@ class KPOTrainer(Trainer):
         self.padding_value = padding_value
 
         self.beta = beta
+        self.lambda_entropy=lambda_entropy
         self.ref_model = ref_model
 
         self._stored_metrics = defaultdict(lambda: defaultdict(list))
@@ -309,6 +312,9 @@ class KPOTrainer(Trainer):
         policy_rejected_logps: Dict[str, torch.FloatTensor],
         reference_chosen_logps: torch.FloatTensor,
         reference_rejected_logps: Dict[str, torch.FloatTensor],
+        policy_chosen_logits: torch.FloatTensor,
+        policy_rejected_logits: Dict[str, torch.FloatTensor],
+        batch: Dict[str, Union[List, torch.LongTensor]],
         select_k: list = None, # batchsize
         reference_free: bool = False,
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
@@ -321,9 +327,11 @@ class KPOTrainer(Trainer):
             "reference_rejected_logps_keys": list(reference_rejected_logps.keys()) if reference_rejected_logps else [],
             "select_k": select_k,
             "reference_free": reference_free,
-            "beta": self.beta
+            "beta": self.beta,
+            "lambda_entropy": self.lambda_entropy
         }, "Computing DPO loss")
-        
+    
+        # Existing log-ratio DPO term
         chosen_logratios = policy_chosen_logps - reference_chosen_logps
         rejected_logratios = {}
         for key in policy_rejected_logps:
@@ -338,7 +346,7 @@ class KPOTrainer(Trainer):
             else:
                 reject_key = f"rejected{i}"
                 logratios_dict[i] = rejected_logratios[reject_key]
-
+    
         debug_log("dpo_loss", "PROCESSING", {
             "chosen_logratios": chosen_logratios,
             "rejected_logratios_keys": list(rejected_logratios.keys()),
@@ -346,32 +354,53 @@ class KPOTrainer(Trainer):
             "total_num": total_num,
             "logratios_dict_keys": list(logratios_dict.keys())
         }, "Computed log ratios")
-
+    
+        # 🔥 Compute entropies
+        chosen_entropies = self._get_batch_entropy(policy_chosen_logits, batch["chosen_labels"])
+        rejected_entropies = {
+            key: self._get_batch_entropy(policy_rejected_logits[key], batch[f"{key}_labels"])
+            for key in policy_rejected_logits
+        }
+    
+        # Loop over batch items
         temp_list = []
         for batch_idx in range(len(select_k)):
             max_k = select_k[batch_idx]
             batch_idx_list = []
             for i in range(0, max_k):
+                # log-ratio diff (as before)
                 temp = sum(torch.exp(self.beta * (logratios_dict[j][batch_idx] - logratios_dict[i][batch_idx])) for j in range(i+1, total_num))
                 temp1 = -torch.log(temp)
-                temp2 = -F.logsigmoid(temp1)
+                
+                # entropy diff: H(y-)-H(y+)
+                reject_key = f"rejected{i}" if i > 0 else None
+                # In dpo_loss function, around the entropy difference calculation:
+                if reject_key:
+                    # Ensure both entropies are properly computed for the same sequence lengths
+                    entropy_diff = rejected_entropies[reject_key][batch_idx] - chosen_entropies[batch_idx]
+                else:
+                    entropy_diff = torch.tensor(0.0, device=chosen_entropies.device)  # Ensure device consistency
+                
+                # combined term
+                combined = self.beta * temp1 + self.lambda_entropy * entropy_diff
+                temp2 = -F.logsigmoid(combined)
                 batch_idx_list.append(temp2)
             temp_list.append(sum(batch_idx_list))
         losses = torch.stack(temp_list)
-
+        
         rejected_rewards = {}
         chosen_rewards = self.beta * (policy_chosen_logps - reference_chosen_logps).detach()
         for key in policy_rejected_logps:
             rejected_rewards[key] = self.beta * (policy_rejected_logps[key] - reference_rejected_logps[key]).detach()
-
+    
         debug_log("dpo_loss", "OUTPUT", {
             "losses": losses,
             "chosen_rewards": chosen_rewards,
             "rejected_rewards_keys": list(rejected_rewards.keys()),
             "losses_mean": losses.mean().item()
         }, "Final DPO loss computation")
-
-        return losses, chosen_rewards, rejected_rewards
+    
+        return losses, chosen_rewards, rejected_rewards, chosen_entropies, rejected_entropies
 
     def _get_batch_logps(
         self,
@@ -418,6 +447,40 @@ class KPOTrainer(Trainer):
         }, "Final log probabilities")
         
         return result
+        
+    def _get_batch_entropy(self, logits: torch.FloatTensor, labels: torch.LongTensor) -> torch.FloatTensor:
+        """
+        Compute per-sequence entropy H(y|x) under the model for response tokens only.
+        This function calculates entropy only for the response part, excluding the query/prompt.
+        """
+        # Shift logits and labels to align for next-token prediction
+        labels = labels[:, 1:].clone()
+        logits = logits[:, :-1, :]
+        
+        # Create loss mask to identify valid (non-padding) tokens
+        loss_mask = (labels != self.label_pad_token_id).float()
+        
+        # Compute probabilities and log probabilities with numerical stability
+        log_probs = F.log_softmax(logits, dim=-1)  # More numerically stable
+        probs = torch.exp(log_probs)  # Convert back to probabilities
+        
+        # Calculate entropy: H = -sum(p * log(p))
+        # Using log_probs directly for better numerical stability
+        entropies = -(probs * log_probs).sum(dim=-1)  # (B, T)
+        
+        # Apply mask to exclude padding tokens
+        masked_entropies = entropies * loss_mask
+        
+        # Calculate average entropy per sequence (only over valid tokens)
+        valid_token_counts = loss_mask.sum(dim=-1)  # Number of valid tokens per sequence
+        
+        # Avoid division by zero
+        valid_token_counts = torch.clamp(valid_token_counts, min=1.0)
+        
+        # Average entropy per sequence
+        seq_entropies = masked_entropies.sum(dim=-1) / valid_token_counts
+        
+        return seq_entropies
 
     def concatenated_forward(
         self, model: nn.Module, batch: Dict[str, Union[List, torch.LongTensor]]
@@ -522,13 +585,17 @@ class KPOTrainer(Trainer):
             "reference_rejected_logps_keys": list(reference_rejected_logps.keys())
         }, "After reference model forward pass")
 
-        losses, chosen_rewards, rejected_rewards = self.dpo_loss(
+        losses, chosen_rewards, rejected_rewards, chosen_entropies, rejected_entropies = self.dpo_loss(
             policy_chosen_logps,
             policy_rejected_logps,
             reference_chosen_logps,
             reference_rejected_logps,
+            policy_chosen_logits,
+            policy_rejected_logits,
+            batch=batch,
             select_k=batch['select_k']
-        )
+        )    
+
 
         reward_accuracies = None
         for key in rejected_rewards:
@@ -538,6 +605,10 @@ class KPOTrainer(Trainer):
                 reward_accuracies *= (chosen_rewards > rejected_rewards[key]).float()
 
         prefix = "eval_" if train_eval == "eval" else ""
+        
+        metrics[f"{prefix}entropy/chosen"] = chosen_entropies.mean().item()
+        for key in rejected_entropies:
+            metrics[f"{prefix}entropy/{key}"] = rejected_entropies[key].mean().item()
         metrics[f"{prefix}rewards/chosen"] = chosen_rewards.cpu().numpy().mean()
         for key in rejected_rewards:
             metrics[f"{prefix}rewards/{key}"] = rejected_rewards[key].cpu().numpy().mean()
@@ -691,8 +762,8 @@ class KPOTrainer(Trainer):
 
         # logits for the chosen and rejected samples from model
         logits_dict = {
-            "logits_test/chosen": metrics["logits_test/chosen"],
-            # "logits_test/rejected": metrics["logits_test/rejected"],
+            "eval_logits/chosen": metrics["eval_logits/chosen"],
+            # "eval_logits/rejected": metrics["eval_logits/rejected"],
         }
         logits = tuple(v for k, v in logits_dict.items() if k not in ignore_keys)
         logits = torch.stack(logits).mean(axis=1)
