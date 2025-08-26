@@ -457,6 +457,11 @@ class KPOTrainer(Trainer):
         labels = labels[:, 1:].clone()
         logits = logits[:, :-1, :]
         
+        # Ensure dimensions match after shifting
+        min_length = min(labels.shape[1], logits.shape[1])
+        labels = labels[:, :min_length]
+        logits = logits[:, :min_length, :]
+        
         # Create loss mask to identify valid (non-padding) tokens
         loss_mask = (labels != self.label_pad_token_id).float()
         
@@ -470,7 +475,7 @@ class KPOTrainer(Trainer):
         
         # Apply mask to exclude padding tokens
         masked_entropies = entropies * loss_mask
-        
+            
         # Calculate average entropy per sequence (only over valid tokens)
         valid_token_counts = loss_mask.sum(dim=-1)  # Number of valid tokens per sequence
         
@@ -481,7 +486,6 @@ class KPOTrainer(Trainer):
         seq_entropies = masked_entropies.sum(dim=-1) / valid_token_counts
         
         return seq_entropies
-
     def concatenated_forward(
         self, model: nn.Module, batch: Dict[str, Union[List, torch.LongTensor]]
     ) -> Tuple[torch.FloatTensor, Dict[str, torch.FloatTensor], torch.FloatTensor, Dict[str, torch.FloatTensor]]:
