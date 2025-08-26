@@ -522,20 +522,20 @@ class KPOTrainer(Trainer):
         cnt = 0
         for key in batch:
             if key.startswith("rejected") and key.endswith("_input_ids"):
-            cnt += 1
-            cur_size = batch[key].shape[0]
-            start = step * (cnt - 1)
-            end = start + cur_size
-            rejected_logps[f"rejected{cnt}"] = all_logps[start:end]
+                cnt += 1
+                cur_size = batch[key].shape[0]
+                start = step * (cnt - 1)
+                end = start + cur_size
+                rejected_logps[f"rejected{cnt}"] = all_logps[start:end]
             
-            debug_log("concatenated_forward", "REJECTED_LOGPS", {
-                "key": key,
-                "slice_range": f"{start}:{end}",
-                "slice_shape": all_logps[start:end].shape,
-                "batch_shape": batch[key].shape,
-                }, f"rejected{cnt} logps slice check")
-
-
+                debug_log("concatenated_forward", "REJECTED_LOGPS", {
+                    "key": key,
+                    "slice_range": f"{start}:{end}",
+                    "slice_shape": all_logps[start:end].shape,
+                    "batch_shape": batch[key].shape,
+                    }, f"rejected{cnt} logps slice check")
+    
+    
         chosen_logits = all_logits[: batch["chosen_input_ids"].shape[0]]
         rejected_logits = {}
         cnt = 0
