@@ -424,10 +424,7 @@ class KPOTrainer(Trainer):
         for key in batch:
             if key.startswith("rejected") and key.endswith("_input_ids"):
                 cnt += 1
-                cur_size = batch[key].shape[0]
-                start = step * (cnt - 1)
-                end = start + cur_size
-                rejected_logits[f"rejected{cnt}"] = all_logits[start:end]
+                rejected_logits[f"rejected{cnt}"] = all_logits[step*cnt : step*(cnt+1)]
         
         
         return (chosen_logps, rejected_logps, chosen_logits, rejected_logits)
