@@ -199,14 +199,16 @@ class KPOTrainer(Trainer):
 
     def concatenated_inputs(self, batch: Dict[str, Union[List, torch.LongTensor]]) -> Dict[str, torch.LongTensor]:
         """Concatenate the chosen and rejected inputs into a single tensor.
-
+    
         Args:
             batch: A batch of data. Must contain the keys 'chosen_input_ids' and 'rejected_input_ids', which are tensors of shape (batch_size, sequence_length).
-
+    
         Returns:
             A dictionary containing the concatenated inputs under the key 'concatenated_input_ids'.
         """
-        
+        # Dynamically calculate max_length from the batch
+        rejected_max_len = max([batch[key].shape[1] for key in batch if key.startswith("rejected") and key.endswith("_input_ids")])
+        max_length = max(batch["chosen_input_ids"].shape[1], rejected_max_len)
         
         concatenated_batch = {}
         for k in batch:
@@ -214,8 +216,8 @@ class KPOTrainer(Trainer):
                 pad_value = self.label_pad_token_id if "labels" in k else self.padding_value
                 concatenated_key = k.replace("chosen", "concatenated")
                 concatenated_batch[concatenated_key] = pad_to_length(batch[k], max_length, pad_value=pad_value)
-                
-        
+                    
+    
         for k in batch:
             if k.startswith("rejected") and isinstance(batch[k], torch.Tensor):
                 pad_value = self.label_pad_token_id if "labels" in k else self.padding_value
@@ -231,7 +233,6 @@ class KPOTrainer(Trainer):
                 
         
         return concatenated_batch
-
     def _get_train_sampler(self, *args, **kwargs) -> Optional[torch.utils.data.Sampler]:
         print("use SequentialSampler")
         sampler = SequentialSampler(self.train_dataset)
@@ -409,10 +410,7 @@ class KPOTrainer(Trainer):
         for key in batch:
             if key.startswith("rejected") and key.endswith("_input_ids"):
                 cnt += 1
-                cur_size = batch[key].shape[0]
-                start = step * (cnt - 1)
-                end = start + cur_size
-                rejected_logps[f"rejected{cnt}"] = all_logps[start:end]
+                rejected_logps[f"rejected{cnt}"] = all_logps[step*cnt : step*(cnt+1)]
             
                 
     
