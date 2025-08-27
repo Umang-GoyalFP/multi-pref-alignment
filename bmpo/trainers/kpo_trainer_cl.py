@@ -351,12 +351,11 @@ class KPOTrainer(Trainer):
     def _get_batch_entropy(self, logits: torch.FloatTensor, labels: torch.LongTensor) -> torch.FloatTensor:
         """
         Compute per-sequence entropy H(y|x) under the model for response tokens only.
-        This function calculates entropy only for the response part, excluding the query/prompt.
         """
         # Shift logits and labels to align for next-token prediction
         labels = labels[:, 1:].clone()
         logits = logits[:, :-1, :]
-        
+            
         # Ensure dimensions match after shifting
         min_length = min(labels.shape[1], logits.shape[1])
         labels = labels[:, :min_length]
@@ -365,17 +364,16 @@ class KPOTrainer(Trainer):
         # Create loss mask to identify valid (non-padding) tokens
         loss_mask = (labels != self.label_pad_token_id).float()
         
-        # Compute probabilities and log probabilities with numerical stability
-        log_probs = F.log_softmax(logits, dim=-1)  # More numerically stable
-        probs = torch.exp(log_probs)  # Convert back to probabilities
+        # Compute probabilities with numerical stability
+        probs = torch.softmax(logits, dim=-1)
+        log_probs = torch.log_softmax(logits, dim=-1)
         
         # Calculate entropy: H = -sum(p * log(p))
-        # Using log_probs directly for better numerical stability
         entropies = -(probs * log_probs).sum(dim=-1)  # (B, T)
         
         # Apply mask to exclude padding tokens
         masked_entropies = entropies * loss_mask
-            
+                
         # Calculate average entropy per sequence (only over valid tokens)
         valid_token_counts = loss_mask.sum(dim=-1)  # Number of valid tokens per sequence
         
