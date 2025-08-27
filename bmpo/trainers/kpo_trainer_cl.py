@@ -291,11 +291,16 @@ class KPOTrainer(Trainer):
                 # entropy diff: H(y-)-H(y+)
                 reject_key = f"rejected{i}" if i > 0 else None
                 # In dpo_loss function, around the entropy difference calculation:
-                if reject_key:
-                    # Ensure both entropies are properly computed for the same sequence lengths
-                    entropy_diff = rejected_entropies[reject_key][batch_idx] - chosen_entropies[batch_idx]
+                if i == 0:
+                    # For chosen response vs all rejected responses
+                    entropy_diff = torch.tensor(0.0, device=chosen_entropies.device, dtype=chosen_entropies.dtype)
+                    for rej_key in rejected_entropies:
+                        entropy_diff += rejected_entropies[rej_key][batch_idx] - chosen_entropies[batch_idx]
+                    entropy_diff = entropy_diff / len(rejected_entropies)  # Average over rejected responses
                 else:
-                    entropy_diff = torch.tensor(0.0, device=chosen_entropies.device)  # Ensure device consistency
+                    # For rejected response vs chosen response
+                    reject_key = f"rejected{i}"
+                    entropy_diff = rejected_entropies[reject_key][batch_idx] - chosen_entropies[batch_idx]
                 
                 # combined term
                 combined = self.beta * temp1 + self.lambda_entropy * entropy_diff
