@@ -189,6 +189,9 @@ def train(
 
 
     dpo_trainer.train()
+    # After training is complete
+    dpo_trainer.plot_final_training_metrics(save_dir="./final_plots")
+    dpo_trainer.save_tracking_data_json("./final_tracking_data.json")
     dpo_trainer.save_model(output_dir)
 
 
