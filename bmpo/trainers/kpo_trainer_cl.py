@@ -442,8 +442,8 @@ class KPOTrainer(Trainer):
         batch_size = len(chosen_logps)
     
         # Track chosen values (individual samples)
-        self.tracking_data['chosen_logps'].extend(chosen_logps.cpu().numpy().tolist())
-        self.tracking_data['chosen_entropy'].extend(chosen_entropies.cpu().numpy().tolist())
+        self.tracking_data['chosen_logps'].extend(chosen_logps.detach().cpu().numpy().tolist())
+        self.tracking_data['chosen_entropy'].extend(chosen_entropies.detach().cpu().numpy().tolist())
         
         # Track rejected values (individual samples)
         for key in rejected_logps:
@@ -451,8 +451,8 @@ class KPOTrainer(Trainer):
                 self.tracking_data['rejected_logps'][key] = []
                 self.tracking_data['rejected_entropy'][key] = []
         
-            self.tracking_data['rejected_logps'][key].extend(rejected_logps[key].cpu().numpy().tolist())
-            self.tracking_data['rejected_entropy'][key].extend(rejected_entropies[key].cpu().numpy().tolist())
+            self.tracking_data['rejected_logps'][key].extend(rejected_logps[key].detach().cpu().numpy().tolist())
+            self.tracking_data['rejected_entropy'][key].extend(rejected_entropies[key].detach().cpu().numpy().tolist())
         
         # Track sample indices
         sample_indices = list(range(self.total_samples_processed, self.total_samples_processed + batch_size))
