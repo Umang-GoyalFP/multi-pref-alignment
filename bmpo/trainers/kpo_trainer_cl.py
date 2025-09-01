@@ -174,6 +174,15 @@ class KPOTrainer(Trainer):
 
         self._stored_metrics = defaultdict(lambda: defaultdict(list))
 
+        # Add this after your existing initialization (after self.current_step = 0 or similar)
+        self.tracking_data = {
+            'chosen_logps': [],
+            'rejected_logps': {'rejected1': [], 'rejected2': [], 'rejected3': []},
+            'chosen_entropy': [],
+            'rejected_entropy': {'rejected1': [], 'rejected2': [], 'rejected3': []},
+            'sample_index': []
+        }
+        self.total_samples_processed = 0
         
         super().__init__(
             model,
@@ -314,7 +323,7 @@ class KPOTrainer(Trainer):
         for key in policy_rejected_logps:
             rejected_rewards[key] = self.beta * (policy_rejected_logps[key] - reference_rejected_logps[key]).detach()
     
-            
+        self.track_sample_metrics(policy_chosen_logps, policy_rejected_logps, chosen_entropies, rejected_entropies)
         return losses, chosen_rewards, rejected_rewards, chosen_entropies, rejected_entropies
 
     def _get_batch_logps(
@@ -428,7 +437,100 @@ class KPOTrainer(Trainer):
         
         
         return (chosen_logps, rejected_logps, chosen_logits, rejected_logits)
-
+    def track_sample_metrics(self, chosen_logps, rejected_logps, chosen_entropies, rejected_entropies):
+        """Track individual sample metrics for end-of-training plotting"""
+        batch_size = len(chosen_logps)
+    
+        # Track chosen values (individual samples)
+        self.tracking_data['chosen_logps'].extend(chosen_logps.cpu().numpy().tolist())
+        self.tracking_data['chosen_entropy'].extend(chosen_entropies.cpu().numpy().tolist())
+        
+        # Track rejected values (individual samples)
+        for key in rejected_logps:
+            if key not in self.tracking_data['rejected_logps']:
+                self.tracking_data['rejected_logps'][key] = []
+                self.tracking_data['rejected_entropy'][key] = []
+        
+            self.tracking_data['rejected_logps'][key].extend(rejected_logps[key].cpu().numpy().tolist())
+            self.tracking_data['rejected_entropy'][key].extend(rejected_entropies[key].cpu().numpy().tolist())
+        
+        # Track sample indices
+        sample_indices = list(range(self.total_samples_processed, self.total_samples_processed + batch_size))
+        self.tracking_data['sample_index'].extend(sample_indices)
+        self.total_samples_processed += batch_size
+    
+    def plot_final_training_metrics(self, save_dir="./final_plots"):
+        """Plot all tracked metrics at the end of training"""
+        import matplotlib.pyplot as plt
+        import os
+            
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Create 4 separate plots as requested
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+            
+        sample_indices = self.tracking_data['sample_index']
+        
+        # Plot 1: Chosen LogPs
+        axes[0, 0].scatter(sample_indices, self.tracking_data['chosen_logps'], 
+                            c='blue', alpha=0.6, s=8, label='Chosen LogPs')
+        axes[0, 0].set_title('Chosen Log Probabilities Across Training Samples', fontsize=12, fontweight='bold')
+        axes[0, 0].set_xlabel('Sample Index')
+        axes[0, 0].set_ylabel('Log Probability')
+        axes[0, 0].grid(True, alpha=0.3)
+        axes[0, 0].legend()
+        
+        # Plot 2: Chosen Entropy
+        axes[0, 1].scatter(sample_indices, self.tracking_data['chosen_entropy'], 
+                          c='green', alpha=0.6, s=8, label='Chosen Entropy')
+        axes[0, 1].set_title('Chosen Response Entropy Across Training Samples', fontsize=12, fontweight='bold')
+        axes[0, 1].set_xlabel('Sample Index')
+        axes[0, 1].set_ylabel('Entropy')
+        axes[0, 1].grid(True, alpha=0.3)
+        axes[0, 1].legend()
+    
+        # Plot 3: All Rejected LogPs
+        colors = ['red', 'orange', 'purple']
+        for i, key in enumerate(['rejected1', 'rejected2', 'rejected3']):
+            if key in self.tracking_data['rejected_logps'] and self.tracking_data['rejected_logps'][key]:
+                axes[1, 0].scatter(sample_indices, self.tracking_data['rejected_logps'][key], 
+                             c=colors[i], alpha=0.6, s=8, label=f'{key} LogPs')
+    
+        axes[1, 0].set_title('Rejected Log Probabilities Across Training Samples', fontsize=12, fontweight='bold')
+        axes[1, 0].set_xlabel('Sample Index')
+        axes[1, 0].set_ylabel('Log Probability')
+        axes[1, 0].grid(True, alpha=0.3)
+        axes[1, 0].legend()
+        
+        # Plot 4: All Rejected Entropies  
+        for i, key in enumerate(['rejected1', 'rejected2', 'rejected3']):
+            if key in self.tracking_data['rejected_entropy'] and self.tracking_data['rejected_entropy'][key]:
+                axes[1, 1].scatter(sample_indices, self.tracking_data['rejected_entropy'][key], 
+                                 c=colors[i], alpha=0.6, s=8, label=f'{key} Entropy')
+        
+        axes[1, 1].set_title('Rejected Response Entropies Across Training Samples', fontsize=12, fontweight='bold')
+        axes[1, 1].set_xlabel('Sample Index')
+        axes[1, 1].set_ylabel('Entropy')
+        axes[1, 1].grid(True, alpha=0.3)
+        axes[1, 1].legend()
+        
+        # Adjust layout and save
+        plt.tight_layout(pad=3.0)
+        plot_path = os.path.join(save_dir, 'final_training_metrics.png')
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Final training metrics plot saved to {plot_path}")
+        print(f"Total samples tracked: {len(sample_indices)}")
+    
+    def save_tracking_data_json(self, save_path="./final_tracking_data.json"):
+        """Save all tracking data to JSON"""
+        import json
+        
+        with open(save_path, 'w') as f:
+            json.dump(self.tracking_data, f, indent=2)
+        
+        print(f"Tracking data saved to {save_path}")
     def get_batch_metrics(
         self,
         model,
@@ -525,6 +627,7 @@ class KPOTrainer(Trainer):
         if return_outputs:
             return (loss, metrics)
         return loss
+    
 
     def generate_samples_for_evaluation(self, model, batch: Dict[str, torch.LongTensor]) -> Tuple[str, str]:
         """Generate samples from the model and reference model for the given batch of inputs."""
