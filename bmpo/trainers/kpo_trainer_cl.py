@@ -566,12 +566,12 @@ class KPOTrainer(Trainer):
         axes[5].legend()
         
         # Plot 7: Temp1 and Entropy Diff Values
-        axes[6].plot(range(len(self.tracking_data['temp1_values'])), self.tracking_data['temp1_values'], 
+        axes[6].plot(range(len(self.tracking_data['temp1_values'])), [v.detach().cpu().item() if hasattr(v, "detach") else v for v in self.tracking_data['temp1_values']], 
                     color='darkblue', alpha=0.7, linewidth=1, label='Temp1 Values')
         
         # Create secondary y-axis for entropy_diff
         ax6_twin = axes[6].twinx()
-        ax6_twin.plot(range(len(self.tracking_data['entropy_diff_values'])), self.tracking_data['entropy_diff_values'], 
+        ax6_twin.plot(range(len(self.tracking_data['entropy_diff_values'])), [v.detach().cpu().item() if hasattr(v, "detach") else v for v in self.tracking_data['temp1_values']], 
                      color='darkgreen', alpha=0.7, linewidth=1, label='Entropy Diff Values')
         
         axes[6].set_title('Temp1 and Entropy Difference Values', fontsize=12, fontweight='bold')
