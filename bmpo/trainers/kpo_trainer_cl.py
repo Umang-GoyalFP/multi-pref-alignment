@@ -175,13 +175,18 @@ class KPOTrainer(Trainer):
         self._stored_metrics = defaultdict(lambda: defaultdict(list))
 
         # Add this after your existing initialization (after self.current_step = 0 or similar)
+        # Add this after your existing initialization (after self.current_step = 0 or similar)
         self.tracking_data = {
             'chosen_logps': [],
             'rejected_logps': {'rejected1': [], 'rejected2': [], 'rejected3': []},
             'chosen_entropy': [],
             'rejected_entropy': {'rejected1': [], 'rejected2': [], 'rejected3': []},
+            'chosen_logratios': [],
+            'rejected_logratios': {'rejected1': [], 'rejected2': [], 'rejected3': []},
+            'temp1_values': [],
+            'entropy_diff_values': [],
             'sample_index': []
-        }
+            }
         self.total_samples_processed = 0
         
         super().__init__(
@@ -289,6 +294,8 @@ class KPOTrainer(Trainer):
     
         # Loop over batch items
         temp_list = []
+        temp1_tracking = []
+        entropy_diff_tracking = []
         for batch_idx in range(len(select_k)):
             max_k = select_k[batch_idx]
             batch_idx_list = []
@@ -310,7 +317,11 @@ class KPOTrainer(Trainer):
                     # For rejected response vs chosen response
                     reject_key = f"rejected{i}"
                     entropy_diff = rejected_entropies[reject_key][batch_idx] - chosen_entropies[batch_idx]
-                
+
+                # Store temp1 and entropy_diff for tracking
+                temp1_tracking.append(temp1.item())
+                entropy_diff_tracking.append(entropy_diff.item())
+
                 # combined term
                 combined = self.beta * temp1 + self.lambda_entropy * entropy_diff
                 temp2 = -F.logsigmoid(combined)
@@ -323,7 +334,8 @@ class KPOTrainer(Trainer):
         for key in policy_rejected_logps:
             rejected_rewards[key] = self.beta * (policy_rejected_logps[key] - reference_rejected_logps[key]).detach()
     
-        self.track_sample_metrics(policy_chosen_logps, policy_rejected_logps, chosen_entropies, rejected_entropies)
+        self.track_sample_metrics(policy_chosen_logps, policy_rejected_logps, chosen_entropies, rejected_entropies, 
+                         chosen_logratios, rejected_logratios, temp_list, select_k)
         return losses, chosen_rewards, rejected_rewards, chosen_entropies, rejected_entropies
 
     def _get_batch_logps(
@@ -437,7 +449,8 @@ class KPOTrainer(Trainer):
         
         
         return (chosen_logps, rejected_logps, chosen_logits, rejected_logits)
-    def track_sample_metrics(self, chosen_logps, rejected_logps, chosen_entropies, rejected_entropies):
+    def track_sample_metrics(self, chosen_logps, rejected_logps, chosen_entropies, rejected_entropies,
+                            chosen_logratios, rejected_logratios, temp1_list, entropy_diff_list):
         """Track individual sample metrics for end-of-training plotting"""
         batch_size = len(chosen_logps)
     
@@ -445,15 +458,24 @@ class KPOTrainer(Trainer):
         self.tracking_data['chosen_logps'].extend(chosen_logps.detach().cpu().numpy().tolist())
         self.tracking_data['chosen_entropy'].extend(chosen_entropies.detach().cpu().numpy().tolist())
         
+        # Track chosen logratios
+        self.tracking_data['chosen_logratios'].extend(chosen_logratios.detach().cpu().numpy().tolist())
+    
         # Track rejected values (individual samples)
         for key in rejected_logps:
             if key not in self.tracking_data['rejected_logps']:
                 self.tracking_data['rejected_logps'][key] = []
                 self.tracking_data['rejected_entropy'][key] = []
-        
+                self.tracking_data['rejected_logratios'][key] = []
+    
             self.tracking_data['rejected_logps'][key].extend(rejected_logps[key].detach().cpu().numpy().tolist())
             self.tracking_data['rejected_entropy'][key].extend(rejected_entropies[key].detach().cpu().numpy().tolist())
+            self.tracking_data['rejected_logratios'][key].extend(rejected_logratios[key].detach().cpu().numpy().tolist())
         
+        # Track temp1 and entropy_diff values
+        self.tracking_data['temp1_values'].extend(temp1_list)
+        self.tracking_data['entropy_diff_values'].extend(entropy_diff_list)
+    
         # Track sample indices
         sample_indices = list(range(self.total_samples_processed, self.total_samples_processed + batch_size))
         self.tracking_data['sample_index'].extend(sample_indices)
@@ -466,53 +488,106 @@ class KPOTrainer(Trainer):
             
         os.makedirs(save_dir, exist_ok=True)
         
-        # Create 4 separate plots as requested
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        # Create 7 plots in a 3x3 grid
+        fig, axes = plt.subplots(3, 3, figsize=(20, 15))
+        axes = axes.flatten()  # Flatten to make indexing easier
             
         sample_indices = self.tracking_data['sample_index']
         
         # Plot 1: Chosen LogPs
-        axes[0, 0].scatter(sample_indices, self.tracking_data['chosen_logps'], 
-                            c='blue', alpha=0.6, s=8, label='Chosen LogPs')
-        axes[0, 0].set_title('Chosen Log Probabilities Across Training Samples', fontsize=12, fontweight='bold')
-        axes[0, 0].set_xlabel('Sample Index')
-        axes[0, 0].set_ylabel('Log Probability')
-        axes[0, 0].grid(True, alpha=0.3)
-        axes[0, 0].legend()
+        axes[0].plot(sample_indices, self.tracking_data['chosen_logps'], 
+                     color='blue', alpha=0.7, linewidth=1, label='Chosen LogPs')
+        axes[0].set_title('Chosen Log Probabilities Across Training Samples', fontsize=12, fontweight='bold')
+        axes[0].set_xlabel('Sample Index')
+        axes[0].set_ylabel('Log Probability')
+        axes[0].grid(True, alpha=0.3)
+        axes[0].legend()
         
         # Plot 2: Chosen Entropy
-        axes[0, 1].scatter(sample_indices, self.tracking_data['chosen_entropy'], 
-                          c='green', alpha=0.6, s=8, label='Chosen Entropy')
-        axes[0, 1].set_title('Chosen Response Entropy Across Training Samples', fontsize=12, fontweight='bold')
-        axes[0, 1].set_xlabel('Sample Index')
-        axes[0, 1].set_ylabel('Entropy')
-        axes[0, 1].grid(True, alpha=0.3)
-        axes[0, 1].legend()
+        axes[1].plot(sample_indices, self.tracking_data['chosen_entropy'], 
+                     color='green', alpha=0.7, linewidth=1, label='Chosen Entropy')
+        axes[1].set_title('Chosen Response Entropy Across Training Samples', fontsize=12, fontweight='bold')
+        axes[1].set_xlabel('Sample Index')
+        axes[1].set_ylabel('Entropy')
+        axes[1].grid(True, alpha=0.3)
+        axes[1].legend()
     
         # Plot 3: All Rejected LogPs
         colors = ['red', 'orange', 'purple']
         for i, key in enumerate(['rejected1', 'rejected2', 'rejected3']):
             if key in self.tracking_data['rejected_logps'] and self.tracking_data['rejected_logps'][key]:
-                axes[1, 0].scatter(sample_indices, self.tracking_data['rejected_logps'][key], 
-                             c=colors[i], alpha=0.6, s=8, label=f'{key} LogPs')
+                axes[2].plot(sample_indices, self.tracking_data['rejected_logps'][key], 
+                        color=colors[i], alpha=0.7, linewidth=1, label=f'{key} LogPs')
     
-        axes[1, 0].set_title('Rejected Log Probabilities Across Training Samples', fontsize=12, fontweight='bold')
-        axes[1, 0].set_xlabel('Sample Index')
-        axes[1, 0].set_ylabel('Log Probability')
-        axes[1, 0].grid(True, alpha=0.3)
-        axes[1, 0].legend()
+        axes[2].set_title('Rejected Log Probabilities Across Training Samples', fontsize=12, fontweight='bold')
+        axes[2].set_xlabel('Sample Index')
+        axes[2].set_ylabel('Log Probability')
+        axes[2].grid(True, alpha=0.3)
+        axes[2].legend()
         
         # Plot 4: All Rejected Entropies  
         for i, key in enumerate(['rejected1', 'rejected2', 'rejected3']):
             if key in self.tracking_data['rejected_entropy'] and self.tracking_data['rejected_entropy'][key]:
-                axes[1, 1].scatter(sample_indices, self.tracking_data['rejected_entropy'][key], 
-                                 c=colors[i], alpha=0.6, s=8, label=f'{key} Entropy')
+                axes[3].plot(sample_indices, self.tracking_data['rejected_entropy'][key], 
+                            color=colors[i], alpha=0.7, linewidth=1, label=f'{key} Entropy')
         
-        axes[1, 1].set_title('Rejected Response Entropies Across Training Samples', fontsize=12, fontweight='bold')
-        axes[1, 1].set_xlabel('Sample Index')
-        axes[1, 1].set_ylabel('Entropy')
-        axes[1, 1].grid(True, alpha=0.3)
-        axes[1, 1].legend()
+        axes[3].set_title('Rejected Response Entropies Across Training Samples', fontsize=12, fontweight='bold')
+        axes[3].set_xlabel('Sample Index')
+        axes[3].set_ylabel('Entropy')
+        axes[3].grid(True, alpha=0.3)
+        axes[3].legend()
+        
+        # Plot 5: Chosen - Rejected Logratios Differences
+        for i, key in enumerate(['rejected1', 'rejected2', 'rejected3']):
+            if key in self.tracking_data['rejected_logratios'] and self.tracking_data['rejected_logratios'][key]:
+                diff_values = [c - r for c, r in zip(self.tracking_data['chosen_logratios'], 
+                                                    self.tracking_data['rejected_logratios'][key])]
+                axes[4].plot(sample_indices, diff_values, 
+                            color=colors[i], alpha=0.7, linewidth=1, label=f'Chosen - {key}')
+        
+        axes[4].set_title('Chosen - Rejected Logratios Differences', fontsize=12, fontweight='bold')
+        axes[4].set_xlabel('Sample Index')
+        axes[4].set_ylabel('Logratios Difference')
+        axes[4].grid(True, alpha=0.3)
+        axes[4].legend()
+        
+        # Plot 6: Rejected - Chosen Entropy Differences
+        for i, key in enumerate(['rejected1', 'rejected2', 'rejected3']):
+            if key in self.tracking_data['rejected_entropy'] and self.tracking_data['rejected_entropy'][key]:
+                diff_values = [r - c for r, c in zip(self.tracking_data['rejected_entropy'][key], 
+                                                    self.tracking_data['chosen_entropy'])]
+                axes[5].plot(sample_indices, diff_values, 
+                            color=colors[i], alpha=0.7, linewidth=1, label=f'{key} - Chosen')
+        
+        axes[5].set_title('Rejected - Chosen Entropy Differences', fontsize=12, fontweight='bold')
+        axes[5].set_xlabel('Sample Index')
+        axes[5].set_ylabel('Entropy Difference')
+        axes[5].grid(True, alpha=0.3)
+        axes[5].legend()
+        
+        # Plot 7: Temp1 and Entropy Diff Values
+        axes[6].plot(range(len(self.tracking_data['temp1_values'])), self.tracking_data['temp1_values'], 
+                    color='darkblue', alpha=0.7, linewidth=1, label='Temp1 Values')
+        
+        # Create secondary y-axis for entropy_diff
+        ax6_twin = axes[6].twinx()
+        ax6_twin.plot(range(len(self.tracking_data['entropy_diff_values'])), self.tracking_data['entropy_diff_values'], 
+                     color='darkgreen', alpha=0.7, linewidth=1, label='Entropy Diff Values')
+        
+        axes[6].set_title('Temp1 and Entropy Difference Values', fontsize=12, fontweight='bold')
+        axes[6].set_xlabel('Computation Index')
+        axes[6].set_ylabel('Temp1 Values', color='darkblue')
+        ax6_twin.set_ylabel('Entropy Diff Values', color='darkgreen')
+        axes[6].grid(True, alpha=0.3)
+            
+        # Combine legends
+        lines1, labels1 = axes[6].get_legend_handles_labels()
+        lines2, labels2 = ax6_twin.get_legend_handles_labels()
+        axes[6].legend(lines1 + lines2, labels1 + labels2, loc='upper right')
+    
+        # Hide unused subplots
+        for i in range(7, 9):
+            axes[i].set_visible(False)
         
         # Adjust layout and save
         plt.tight_layout(pad=3.0)
