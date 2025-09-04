@@ -311,12 +311,12 @@ class KPOTrainer(Trainer):
                     # For chosen response vs all rejected responses
                     entropy_diff = torch.tensor(0.0, device=chosen_entropies.device, dtype=chosen_entropies.dtype)
                     for rej_key in rejected_entropies:
-                        entropy_diff += rejected_entropies[rej_key][batch_idx] - chosen_entropies[batch_idx]
+                        entropy_diff += chosen_entropies[batch_idx]-rejected_entropies[rej_key][batch_idx]
                     entropy_diff = entropy_diff / len(rejected_entropies)  # Average over rejected responses
                 else:
                     # For rejected response vs chosen response
                     reject_key = f"rejected{i}"
-                    entropy_diff = rejected_entropies[reject_key][batch_idx] - chosen_entropies[batch_idx]
+                    entropy_diff = chosen_entropies[batch_idx] - rejected_entropies[reject_key][batch_idx]
 
                 # Store temp1 and entropy_diff for tracking
                 temp1_tracking.append(temp1.item())
@@ -554,7 +554,7 @@ class KPOTrainer(Trainer):
         # Plot 6: Rejected - Chosen Entropy Differences
         for i, key in enumerate(['rejected1', 'rejected2', 'rejected3']):
             if key in self.tracking_data['rejected_entropy'] and self.tracking_data['rejected_entropy'][key]:
-                diff_values = [r - c for r, c in zip(self.tracking_data['rejected_entropy'][key], 
+                diff_values = [c-r for r, c in zip(self.tracking_data['rejected_entropy'][key], 
                                                     self.tracking_data['chosen_entropy'])]
                 axes[5].plot(sample_indices, diff_values, 
                             color=colors[i], alpha=0.7, linewidth=1, label=f'{key} - Chosen')
